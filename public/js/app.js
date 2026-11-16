@@ -7,6 +7,7 @@ import {
   esc, euro, parseEuroInput, centsToInput, monthKey, monthLabel, shiftMonth, formatDate, relativeDue,
 } from './util.js';
 import { toISODate } from './parse.js';
+import { sync } from './sync.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
@@ -45,6 +46,23 @@ function dropImageUrl(id) {
 async function changed() {
   markDirty();
   await render();
+  scheduleSync();
+}
+
+// Abgleich mit dem Server (To-Dos, Ideen). Läuft still im Hintergrund, wenn online.
+let syncTimer = null;
+function scheduleSync(delay = 1500) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, delay);
+}
+async function runSync() {
+  try {
+    const r = await sync();
+    backupSettings.set({ syncAt: r.skipped ? backupSettings.get().syncAt : new Date().toISOString(), syncError: null });
+    if (r.received && sheet.hidden) await render();
+  } catch (e) {
+    backupSettings.set({ syncError: e.message });
+  }
 }
 
 // ---------- Sheet (Bottom-Sheet für Bearbeiten) ----------
@@ -203,6 +221,16 @@ const IDEA_STATUS = [
   { id: 'erledigt', name: 'Umgesetzt' },
   { id: 'verworfen', name: 'Verworfen' },
 ];
+// Vorlage für Projektideen
+const IDEA_FIELDS = [
+  { key: 'short', label: 'Kurzbeschreibung', rows: 2, ph: 'Ein, zwei Sätze, worum es geht' },
+  { key: 'idea', label: 'Idee', rows: 4, ph: 'Was genau ist die Idee?' },
+  { key: 'goal', label: 'Ziel', rows: 3, ph: 'Was soll am Ende erreicht sein?' },
+  { key: 'implementation', label: 'Umsetzung', rows: 4, ph: 'Wie wird es umgesetzt? Schritte, Technik, Material' },
+  { key: 'effort', label: 'Aufwand und Kosten', rows: 3, ph: 'Zeit, Geld, Material' },
+  { key: 'summary', label: 'Aktueller Stand', rows: 5, ph: 'Zusammenfassung der bisherigen Diskussion' },
+  { key: 'questions', label: 'Offene Fragen', rows: 3, ph: 'Was ist noch unklar?' },
+];
 const IDEA_ST = Object.fromEntries(IDEA_STATUS.map((x) => [x.id, x]));
 const IDEA_FILTERS = [
   { id: 'offen', name: 'Offen', test: (i) => i.status === 'idee' || i.status === 'aktiv' },
@@ -224,7 +252,7 @@ async function renderIdeas() {
     <div class="filter">${IDEA_FILTERS.map((x) => `<button class="chip${x.id === f.id ? ' on' : ''}" data-f="${x.id}">${esc(x.name)} <span class="muted">${ideas.filter(x.test).length}</span></button>`).join('')}</div>
     ${shown.map((i) => `<div class="card idea-card" data-iid="${i.id}">
       <h3>${esc(i.title)}</h3>
-      ${i.summary ? `<p>${esc(i.summary)}</p>` : ''}
+      ${(i.short || i.summary) ? `<p>${esc(i.short || i.summary)}</p>` : ''}
       <div class="idea-meta"><span class="badge st-${i.status}">${esc(IDEA_ST[i.status]?.name || i.status)}</span>
         ${(i.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join('')}
         ${(i.log || []).some((e) => e.by === 'claude') ? '<span class="tag">· mit Claude</span>' : ''}</div>
@@ -247,13 +275,13 @@ function ideaLogHtml(log) {
 
 async function editIdea(id) {
   const isNew = !id;
-  const i = isNew ? { id: uid(), title: '', summary: '', status: 'idee', tags: [], log: [], createdAt: Date.now() } : await db.get('ideas', id);
+  const i = isNew ? { id: uid(), title: '', status: 'idee', tags: [], log: [], createdAt: Date.now() } : await db.get('ideas', id);
   if (!i) return;
   let status = i.status;
   openSheet(`
     <div class="sheet-head"><button class="link" data-act="cancel">Abbrechen</button><h2>${isNew ? 'Neue Idee' : 'Idee'}</h2><button class="link" data-act="save"><b>Sichern</b></button></div>
     <label class="field"><span>Titel</span><input id="i-title" value="${esc(i.title)}" placeholder="Worum geht's?"></label>
-    <label class="field"><span>Aktueller Stand</span><textarea id="i-summary" rows="7" placeholder="Was ist die Idee, was ist schon klar, was sind die nächsten Schritte?">${esc(i.summary || '')}</textarea></label>
+    ${IDEA_FIELDS.map((f) => `<label class="field"><span>${esc(f.label)}</span><textarea id="i-${f.key}" rows="${f.rows}" placeholder="${esc(f.ph)}">${esc(i[f.key] || '')}</textarea></label>`).join('')}
     <div class="field"><span>Status</span><div class="chips">
       ${IDEA_STATUS.map((x) => `<button type="button" class="chip${x.id === status ? ' on' : ''}" data-st="${x.id}">${esc(x.name)}</button>`).join('')}
     </div></div>
@@ -272,21 +300,22 @@ async function editIdea(id) {
   sheet.querySelector('[data-act="save"]').onclick = async () => {
     const title = $('#i-title').value.trim();
     if (!title) { toast('Bitte einen Titel eintragen'); return; }
-    const summary = $('#i-summary').value.trim();
+    const values = Object.fromEntries(IDEA_FIELDS.map((f) => [f.key, $('#i-' + f.key).value.trim()]));
     const note = $('#i-note').value.trim();
     const log = [...(i.log || [])];
     const now = Date.now();
     if (isNew) log.push({ at: now, by: 'ich', text: 'Idee angelegt' });
     else {
       const changes = [];
-      if (summary !== (i.summary || '')) changes.push('Stand aktualisiert');
+      const changedFields = IDEA_FIELDS.filter((f) => values[f.key] !== (i[f.key] || '')).map((f) => f.label);
+      if (changedFields.length) changes.push(changedFields.join(', ') + ' geändert');
       if (status !== i.status) changes.push(`Status: ${IDEA_ST[status].name}`);
       if (title !== i.title) changes.push('Titel geändert');
       if (changes.length) log.push({ at: now, by: 'ich', text: changes.join(', ') });
     }
     if (note) log.push({ at: now, by: 'ich', text: note });
     await db.put('ideas', {
-      ...i, title, status, summary, log,
+      ...i, ...values, title, status, log,
       tags: $('#i-tags').value.split(',').map((t) => t.trim().replace(/^#/, '')).filter(Boolean),
     });
     closeSheet();
@@ -294,7 +323,7 @@ async function editIdea(id) {
   };
   const td = sheet.querySelector('[data-act="todo"]');
   if (td) td.onclick = async () => {
-    await db.put('todos', { id: uid(), title: i.title, done: false, due: null, note: i.summary || '', createdAt: Date.now() });
+    await db.put('todos', { id: uid(), title: i.title, done: false, due: null, note: i.short || '', createdAt: Date.now() });
     closeSheet();
     markDirty();
     toast('Als Aufgabe angelegt');
@@ -555,13 +584,15 @@ function renderMore() {
   const last = s.lastAt ? new Date(s.lastAt).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : 'noch nie';
   const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   view.innerHTML = `
-    <div class="section-title">Backup auf deinen Server</div>
+    <div class="section-title">Dein Server</div>
     <div class="card">
       <p class="small" style="margin-top:0">
         <span class="status-dot ${s.lastError ? 'err' : s.lastAt ? 'ok' : ''}"></span>
         Letzte Sicherung: <b>${esc(last)}</b>${s.lastError ? `<br><span style="color:var(--danger)">${esc(s.lastError)}</span>` : ''}
+        <br><span class="status-dot ${s.syncError ? 'err' : s.syncAt ? 'ok' : ''}"></span>
+        Abgleich mit Claude: <b>${esc(s.syncAt ? new Date(s.syncAt).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : 'noch nie')}</b>${s.syncError ? `<br><span style="color:var(--danger)">${esc(s.syncError)}</span>` : ''}
       </p>
-      <label class="field"><span>Backup-Schlüssel</span><input id="b-token" type="password" autocomplete="off" value="${esc(s.token)}" placeholder="vom Server (BACKUP_TOKEN)"></label>
+      <label class="field"><span>Server-Schlüssel</span><input id="b-token" type="password" autocomplete="off" value="${esc(s.token)}" placeholder="vom Server (BACKUP_TOKEN)"></label>
       <label class="field"><span>Server-Adresse (leer = diese Seite)</span><input id="b-url" inputmode="url" autocomplete="off" value="${esc(s.url)}" placeholder="${esc(location.origin)}"></label>
       <label class="row" style="padding:4px 4px 12px;min-height:0;border:0">
         <span class="grow">Automatisch sichern, wenn Internet da ist</span>
@@ -569,6 +600,7 @@ function renderMore() {
       </label>
       <div class="btn-row">
         <button class="btn primary" id="b-now">Jetzt sichern</button>
+        <button class="btn" id="b-sync">Abgleichen</button>
         <button class="btn" id="b-restore">Wiederherstellen</button>
       </div>
     </div>
@@ -607,6 +639,14 @@ function renderMore() {
       backupSettings.set({ lastError: err.message });
       toast(navigator.onLine ? err.message : 'Kein Internet. Sicherung später.');
     }
+    renderMore();
+  };
+  $('#b-sync').onclick = async (e) => {
+    saveSettings();
+    e.target.disabled = true;
+    await runSync();
+    const st = backupSettings.get();
+    toast(st.syncError ? st.syncError : 'Abgeglichen');
     renderMore();
   };
   $('#b-restore').onclick = async () => {
@@ -675,9 +715,13 @@ if ('serviceWorker' in navigator) {
 const hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
 
 // Automatisches Backup: beim Start, wenn das Netz zurückkommt und wenn die App in den Hintergrund geht.
-window.addEventListener('online', () => autoBackup());
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') autoBackup(); });
+window.addEventListener('online', () => { autoBackup(); scheduleSync(200); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') autoBackup();
+  else scheduleSync(300);
+});
 setTimeout(() => autoBackup(), 3000);
+scheduleSync(500);
 
 // ---------- Start ----------
 try { state.tab = localStorage.getItem('lifestyle.tab') || 'todos'; } catch { /* egal */ }

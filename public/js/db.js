@@ -34,12 +34,46 @@ function tx(store, mode, fn) {
   }));
 }
 
-export const db = {
+// To-Dos und Ideen werden mit dem Server abgeglichen. Gelöschte Einträge bleiben dafür als
+// "Grabstein" (deleted: true) liegen und werden in der App ausgeblendet.
+export const SYNCED = ['todos', 'ideas'];
+const PENDING_KEY = 'lifestyle.sync.pending';
+
+export function pendingIds() {
+  try { return JSON.parse(localStorage.getItem(PENDING_KEY)) || {}; } catch { return {}; }
+}
+export function setPending(map) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(map)); } catch { /* egal */ }
+}
+function markPending(store, id) {
+  if (!SYNCED.includes(store)) return;
+  const p = pendingIds();
+  p[store + ':' + id] = true;
+  setPending(p);
+}
+
+const raw = {
   all: (store) => tx(store, 'readonly', (s) => s.getAll()),
   get: (store, id) => tx(store, 'readonly', (s) => s.get(id)),
-  // updatedAt hilft später beim Abgleich mit dem Server
-  put: (store, value) => tx(store, 'readwrite', (s) => { s.put({ ...value, updatedAt: Date.now() }); }),
-  delete: (store, id) => tx(store, 'readwrite', (s) => { s.delete(id); }),
+  put: (store, value) => tx(store, 'readwrite', (s) => { s.put(value); }),
+};
+
+export const db = {
+  raw,
+  all: async (store) => (await raw.all(store)).filter((x) => !x.deleted),
+  get: async (store, id) => { const x = await raw.get(store, id); return x && !x.deleted ? x : undefined; },
+  put: async (store, value) => {
+    await raw.put(store, { ...value, updatedAt: Date.now() });
+    markPending(store, value.id);
+  },
+  delete: async (store, id) => {
+    if (SYNCED.includes(store)) {
+      await raw.put(store, { id, deleted: true, updatedAt: Date.now() });
+      markPending(store, id);
+    } else {
+      await tx(store, 'readwrite', (s) => { s.delete(id); });
+    }
+  },
   clear: (store) => tx(store, 'readwrite', (s) => { s.clear(); }),
 };
 
@@ -78,8 +112,14 @@ export async function exportAll() {
 export async function importAll(data) {
   if (!data || data.app !== 'lifestyle') throw new Error('Das ist keine Backup-Datei dieser App.');
   let count = 0;
-  for (const t of data.todos || []) { await db.put('todos', t); count++; }
-  for (const i of data.ideas || []) { await db.put('ideas', i); count++; }
+  const keep = async (store, rec) => {
+    const cur = await raw.get(store, rec.id);
+    if (cur && (cur.updatedAt || 0) > (rec.updatedAt || 0)) return;
+    await raw.put(store, { ...rec, updatedAt: rec.updatedAt || Date.now() });
+    markPending(store, rec.id);
+  };
+  for (const t of data.todos || []) { await keep('todos', t); count++; }
+  for (const i of data.ideas || []) { await keep('ideas', i); count++; }
   for (const r of data.receipts || []) {
     await db.put('receipts', { ...r, image: r.image ? await dataURLToBlob(r.image) : null });
     count++;

@@ -1,6 +1,6 @@
 // Service Worker: legt die ganze App auf dem iPhone ab, damit sie ohne Internet läuft.
 // Bei jeder neuen Version VERSION erhöhen, dann holt sich die App das Update beim nächsten Online-Start.
-const VERSION = '2026.11.16-1';
+const VERSION = '2026.11.16-2';
 const CACHE = 'lifestyle-' + VERSION;
 
 const ASSETS = [
@@ -15,6 +15,7 @@ const ASSETS = [
   'js/charts.js',
   'js/util.js',
   'js/backup.js',
+  'js/sync.js',
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/apple-touch-icon.png',

@@ -5,6 +5,8 @@ import { createReadStream } from 'node:fs';
 import { stat, mkdir, readdir, writeFile, rename, unlink, readFile } from 'node:fs/promises';
 import { join, normalize, extname } from 'node:path';
 import { timingSafeEqual, createHash } from 'node:crypto';
+import { Store } from './store.js';
+import { handleMcp } from './mcp.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = process.env.PUBLIC_DIR || new URL('../public', import.meta.url).pathname;
@@ -13,6 +15,8 @@ const TOKEN = process.env.BACKUP_TOKEN || '';
 const KEEP = Number(process.env.BACKUP_KEEP || 30);
 const MAX_BODY = Number(process.env.BACKUP_MAX_MB || 300) * 1024 * 1024;
 const BACKUP_DIR = join(DATA_DIR, 'backups');
+const MCP_TOKEN = process.env.MCP_TOKEN || '';
+const store = new Store(DATA_DIR);
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -33,14 +37,14 @@ function send(res, status, body, headers = {}) {
 }
 const json = (res, status, obj) => send(res, status, JSON.stringify(obj), { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
 
-function authorized(req) {
-  if (!TOKEN) return false;
-  const h = req.headers.authorization || '';
-  const given = h.startsWith('Bearer ') ? h.slice(7) : '';
-  const a = createHash('sha256').update(given).digest();
-  const b = createHash('sha256').update(TOKEN).digest();
+function same(given, secret) {
+  if (!secret) return false;
+  const a = createHash('sha256').update(given || '').digest();
+  const b = createHash('sha256').update(secret).digest();
   return timingSafeEqual(a, b);
 }
+const bearer = (req) => { const h = req.headers.authorization || ''; return h.startsWith('Bearer ') ? h.slice(7) : ''; };
+const authorized = (req) => same(bearer(req), TOKEN);
 
 async function readBody(req) {
   const chunks = [];
@@ -75,6 +79,12 @@ async function handleApi(req, res, path) {
     const all = await listBackups();
     for (const old of all.slice(0, Math.max(0, all.length - KEEP))) await unlink(join(BACKUP_DIR, old)).catch(() => {});
     return json(res, 201, { ok: true, name, bytes: body.length });
+  }
+  if (path === '/api/sync' && req.method === 'POST') {
+    let parsed;
+    try { parsed = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'Kein gültiges JSON.' }); }
+    const since = Number(parsed.since) || 0;
+    return json(res, 200, await store.sync(since, Array.isArray(parsed.changes) ? parsed.changes : []));
   }
   if (path === '/api/backup/latest' && req.method === 'GET') {
     const all = await listBackups();
@@ -123,6 +133,13 @@ const server = http.createServer(async (req, res) => {
   try {
     if (pathname === '/healthz') return send(res, 200, 'ok', { 'Content-Type': 'text/plain' });
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname);
+    if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
+      // Geheimnis in der Adresse (/mcp/<MCP_TOKEN>) oder als Bearer-Header.
+      const ok = same(pathname.slice(5), MCP_TOKEN) || same(bearer(req), MCP_TOKEN);
+      if (!ok) return json(res, MCP_TOKEN ? 401 : 503, { error: MCP_TOKEN ? 'Nicht berechtigt.' : 'MCP_TOKEN ist nicht gesetzt.' });
+      const body = req.method === 'POST' ? (await readBody(req)).toString('utf8') : '';
+      return await handleMcp(store, req, res, body, send);
+    }
     return await serveStatic(req, res, pathname);
   } catch (err) {
     console.error(err);
@@ -131,5 +148,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Lifestyle läuft auf Port ${PORT}${TOKEN ? '' : ' (ohne BACKUP_TOKEN: Backup aus)'}`);
+  console.log(`Lifestyle läuft auf Port ${PORT}${TOKEN ? '' : ' (ohne BACKUP_TOKEN: Backup und Abgleich aus)'}${MCP_TOKEN ? '' : ' (ohne MCP_TOKEN: Claude-Connector aus)'}`);
 });
