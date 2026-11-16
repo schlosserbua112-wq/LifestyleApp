@@ -29,6 +29,7 @@ async function getWorker() {
       const core = simdSupported() ? 'tesseract-core-simd-lstm.wasm.js' : 'tesseract-core-lstm.wasm.js';
       const worker = await window.Tesseract.createWorker('deu', 1, {
         workerPath: base + 'worker.min.js',
+        workerBlobURL: false, // Worker direkt laden, damit er offline aus dem Service Worker kommt
         corePath: base + 'core/' + core,
         langPath: base + 'lang',
         logger: (m) => progressCb(m),

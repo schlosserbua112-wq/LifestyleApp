@@ -617,7 +617,9 @@ function renderMore() {
     <div class="section-title">Über die App</div>
     <div class="card small">
       <p style="margin-top:0">Alle Daten liegen nur auf diesem iPhone. Die App funktioniert ohne Internet. Ist das iPhone online, holt sie sich Updates automatisch und sichert (falls eingerichtet) auf deinen Server.</p>
-      ${standalone ? '' : '<p class="hint">Zum Installieren: in Safari auf <b>Teilen</b> tippen und <b>Zum Home-Bildschirm</b> wählen.</p>'}
+      <p><span class="status-dot ${offline.shell ? 'ok' : ''}"></span>App offline verfügbar: <b>${offline.shell ? 'ja' : 'noch nicht'}</b><br>
+        <span class="status-dot ${offline.ocr ? 'ok' : ''}"></span>Texterkennung offline: <b>${offline.ocr ? 'ja' : 'wird geladen …'}</b></p>
+      ${standalone ? '' : '<p class="hint">Zum Installieren: in Safari auf <b>Teilen</b> tippen und <b>Zum Home-Bildschirm</b> wählen. Danach die App einmal mit Internet vom Home-Bildschirm öffnen, bis hier zweimal "ja" steht.</p>'}
       <p class="muted" style="margin-bottom:0">Version <span id="app-version">…</span></p>
     </div>
   `;
@@ -672,6 +674,7 @@ function renderMore() {
   };
   $('#f-import').onclick = () => $('#import-file').click();
   showVersion();
+  if (!offline.ocr && Date.now() - (offline.askedAt || 0) > 15000) askOfflineStatus();
 }
 
 $('#import-file').addEventListener('change', async (e) => {
@@ -696,20 +699,39 @@ async function showVersion() {
 }
 
 // ---------- Offline & Updates ----------
+const offline = { shell: false, ocr: false, version: null };
+function askOfflineStatus() {
+  offline.askedAt = Date.now();
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({ type: 'offline-status' });
+  }
+}
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', async () => {
-    try {
-      const reg = await navigator.serviceWorker.register('sw.js');
-      // Bei jedem Öffnen kurz nach Updates schauen (nur wenn online)
-      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.onLine) reg.update().catch(() => {}); });
-      let reloading = false;
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        if (reloading || !hadController) return;
-        reloading = true;
-        toast('App wurde aktualisiert');
-        setTimeout(() => location.reload(), 600);
-      });
-    } catch (e) { console.warn('Service Worker nicht registriert', e); }
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (!e.data || e.data.type !== 'offline-status') return;
+    Object.assign(offline, e.data);
+    let shown = false;
+    try { shown = localStorage.getItem('lifestyle.offlineReady') === e.data.version; } catch { /* egal */ }
+    if (offline.shell && offline.ocr && !shown) {
+      toast('App ist jetzt offline verfügbar');
+      try { localStorage.setItem('lifestyle.offlineReady', e.data.version); } catch { /* egal */ }
+    }
+    if (state.tab === 'more' && sheet.hidden) renderMore();
+  });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    // Bei jedem Öffnen kurz nach Updates schauen (nur wenn online)
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.onLine) reg.update().catch(() => {}); });
+  }).catch((e) => console.warn('Service Worker nicht registriert', e));
+  navigator.serviceWorker.ready.then(() => {
+    if (navigator.serviceWorker.controller) askOfflineStatus();
+    else navigator.serviceWorker.addEventListener('controllerchange', askOfflineStatus, { once: true });
+  });
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloading || !hadController) return;
+    reloading = true;
+    toast('App wurde aktualisiert');
+    setTimeout(() => location.reload(), 600);
   });
 }
 const hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
