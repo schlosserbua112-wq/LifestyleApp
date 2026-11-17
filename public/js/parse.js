@@ -9,7 +9,6 @@ export const CATEGORIES = [
   { id: 'lebensmittel', name: 'Lebensmittel', icon: '🛒' },
   { id: 'restaurant', name: 'Essen & Trinken', icon: '🍽️' },
   { id: 'mobilitaet', name: 'Mobilität', icon: '⛽' },
-  { id: 'drogerie', name: 'Drogerie', icon: '🧴' },
   { id: 'freizeit', name: 'Freizeit', icon: '🎟️' },
   { id: 'haushalt', name: 'Haushalt', icon: '🏠' },
   { id: 'kleidung', name: 'Kleidung', icon: '👕' },
@@ -19,7 +18,7 @@ export const CATEGORIES = [
 const MERCHANT_HINTS = [
   [/rewe|edeka|aldi|lidl|penny|netto|kaufland|norma|globus|tegut|spar|billa|hofer|migros|coop|denns|alnatura|bäck|baeck|metzger/i, 'lebensmittel'],
   [/aral|shell|esso|jet\b|totalenergies|avia|omv|agip|eni|tankstelle|db\s|bahn|mvg|bvg|hvv|parken|park/i, 'mobilitaet'],
-  [/\bdm\b|dm-drogerie|rossmann|müller|mueller|bipa|apotheke/i, 'drogerie'],
+  [/\bdm\b|dm-drogerie|rossmann|müller|mueller|bipa|apotheke/i, 'haushalt'],
   [/restaurant|café|cafe|pizz|burger|mcdonald|kebap|döner|doner|sushi|bistro|bar\b|gaststätte|imbiss|starbucks|subway/i, 'restaurant'],
   [/ikea|obi|bauhaus|hornbach|toom|hagebau|tedi|action|depot/i, 'haushalt'],
   [/h&m|zara|primark|c&a|deichmann|kik|tk\s?maxx|zalando|snipes/i, 'kleidung'],
