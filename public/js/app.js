@@ -8,6 +8,7 @@ import { backupSettings, markDirty, uploadBackup, restoreBackup, autoBackup } fr
 import { esc, euro, euroShort, parseEuroInput, centsToInput, monthKey, monthLabel, shiftMonth, formatDate, relativeDue } from './util.js';
 import { sync } from './sync.js';
 import { createWeg } from './weg.js';
+import * as Q from './qty.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const CAT = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
@@ -124,7 +125,19 @@ function frequent() {
   }
   return [...m.values()].sort((a, b) => b.n - a.n || b.last - a.last).slice(0, 10);
 }
-const shopCard = (x) => `<div class="row">${CK}<div><div class="t">${esc(x.emoji || emoOf(x.title))} ${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([x.qty, x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
+// Menge = Zahl + Einheit. Gespeichert als Text („2“, „500 g“, „1,5 l“); Stück ist die Grundeinheit ohne Zusatz.
+const UNITS = ['Stück', 'g', 'kg', 'ml', 'l'];
+const UNIT_RE = /^\s*(\d+(?:[.,]\d+)?)\s*(stück|stk\.?|x|kg|g|ml|l)?\s*$/i;
+function splitQty(q) {
+  const m = String(q || '').match(UNIT_RE); if (!m) return { n: '', u: 'Stück', raw: String(q || '') };
+  const u = (m[2] || '').toLowerCase(); return { n: m[1].replace('.', ','), u: UNITS.find((x) => x.toLowerCase() === u) || 'Stück' };
+}
+function joinQty(n, u) { n = String(n || '').trim(); if (!n) return ''; return u && u !== 'Stück' ? `${n} ${u}` : n; }
+const qtyLabel = (q) => { const s = splitQty(q); return s.n && s.u === 'Stück' && !s.raw ? `${s.n} Stück` : (q || ''); };
+const qtyField = (n, u) => `<div class="qtyf"><input class="qn" id="qN" inputmode="decimal" placeholder="Menge" value="${esc(n || '')}" autocomplete="off" aria-label="Menge"><div class="units" role="radiogroup" aria-label="Einheit">${UNITS.map((x) => `<button type="button" class="${x === (u || 'Stück') ? 'on' : ''}" data-unit="${x}">${x}</button>`).join('')}</div></div>`;
+const unitOf = (root) => { const b = root.querySelector('.units .on'); return b ? b.dataset.unit : 'Stück'; };
+function setUnit(root, u) { root.querySelectorAll('.units button').forEach((b) => b.classList.toggle('on', b.dataset.unit === u)); }
+const shopCard = (x) => `<div class="row">${CK}<div><div class="t">${esc(x.emoji || emoOf(x.title))} ${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([qtyLabel(x.qty), x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
 function shopItems() {
   // Wie bei Aufgaben: jedes Ding bekommt einen freien Platz (Mitte, dann rechts) und bleibt dort, bis man es verschiebt.
   const items = onList().slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
@@ -318,11 +331,9 @@ async function buyShop(x) {
   }, 380);
 }
 async function addShop({ title, qty = '', emoji, note = '' }, rect, msg) {
-  const same = onList().find((x) => norm(x.title) === norm(title));
+  const same = onList().find((x) => Q.looseKey(x.title) === Q.looseKey(title));
   if (same) {
-    const n = parseInt(same.qty, 10);
-    const add = parseInt(qty, 10) || 1;
-    const next = /^\d+$/.test(String(same.qty || '').trim()) || !same.qty ? String((Number.isFinite(n) ? n : 1) + add) : same.qty;
+    const next = Q.mergeQty(same.qty || '1', qty || '1');
     await db.put('shopping', { ...same, qty: next });
     await changed(SHOP);
     toast(`${same.title} steht schon drauf, Menge erhöht`);
@@ -436,27 +447,70 @@ function todoSheet(t) {
   };
 }
 
+// --- Rezept-Link: Zutaten erkennen und auswählen ---
+const isLink = (t) => /^(https?:\/\/|www\.)\S+$/i.test(String(t).trim());
+async function recipeFromLink(link) {
+  const s = backupSettings.get();
+  if (!s.token) { toast('Rezepte gehen über deinen Server. Richte unter Mehr den Abgleich ein.'); return; }
+  if (!navigator.onLine) { toast('Für Rezept-Links braucht es Internet.'); return; }
+  toast('Rezept wird gelesen …');
+  const url = /^www\./i.test(link) ? 'https://' + link : link;
+  try {
+    const res = await fetch((s.url || location.origin).replace(/\/$/, '') + '/api/recipe', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + s.token }, body: JSON.stringify({ url }) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(r.error || 'Das Rezept ließ sich nicht lesen.'); return; }
+    clearTimeout(toastT); toastEl.classList.remove('show');
+    recipeSheet(r);
+  } catch { toast('Der Server ist gerade nicht erreichbar.'); }
+}
+function onListText(x) {
+  const cur = x.on.qty || '', next = x.qty ? Q.mergeQty(cur || '1', x.qty) : cur;
+  return next && next !== (cur || '1') ? `steht schon drauf, wird ${qtyLabel(next)}` : `steht schon drauf${cur ? ' (' + qtyLabel(cur) + ')' : ''}`;
+}
+function recipeSheet(r) {
+  const listed = onList();
+  const rows = r.items.map((it, i) => { const on = listed.find((x) => Q.looseKey(x.title) === Q.looseKey(it.title)); return { ...it, i, sel: !it.pantry, on }; });
+  const draw = () => rows.map((x) => `<div class="lrow rcp${x.sel ? ' sel' : ''}" data-i="${x.i}"><span class="rck"></span><div class="grow"><div class="title">${esc(x.title)}</div><div class="sub">${esc([x.qty ? qtyLabel(x.qty) : '', x.on ? onListText(x) : x.pantry ? 'hast du wahrscheinlich da' : ''].filter(Boolean).join(' · '))}</div></div></div>`).join('');
+  const count = () => rows.filter((x) => x.sel).length;
+  openSheet(`${sheetHead(r.name || 'Rezept')}<div class="sbody"><p class="muted" style="margin:0 0 10px">${r.servings ? esc(r.servings) + ' · ' : ''}Antippen wählt ab oder aus.</p><div class="list" id="rc-list">${draw()}</div>
+    <div class="btn-row"><button class="btn primary" data-act="add" id="rc-add">${count()} auf die Liste</button></div></div>`);
+  bindClose();
+  const list = $('#rc-list');
+  list.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-i]'); if (!row) return;
+    const x = rows[+row.dataset.i]; x.sel = !x.sel; row.classList.toggle('sel', x.sel);
+    $('#rc-add').textContent = `${count()} auf die Liste`;
+  });
+  $('#rc-add').onclick = async () => {
+    const pick = rows.filter((x) => x.sel); if (!pick.length) return closeSheet();
+    let added = 0, merged = 0;
+    for (const it of pick) {
+      const same = onList().find((x) => Q.looseKey(x.title) === Q.looseKey(it.title));
+      if (same) { await db.put('shopping', { ...same, qty: it.qty ? Q.mergeQty(same.qty || '1', it.qty) : same.qty }); merged++; }
+      else { await db.put('shopping', { id: uid(), title: it.title, qty: it.qty || '', emoji: emoOf(it.title), note: '', bought: false, createdAt: Date.now() }); added++; }
+      await load();
+    }
+    await closeSheet(); await changed(SHOP);
+    toast(`${added} neu auf der Liste${merged ? `, ${merged} zusammengelegt` : ''}`);
+  };
+}
+
 // --- Einkauf ---
 function shopSheet(x) {
   let qty = x.qty || '';
   openSheet(`${sheetHead('')}<div class="sbody">
       <textarea class="ttl" id="s-title" rows="1">${esc(x.title)}</textarea>
       <div class="lab">Menge</div>
-      <div class="stepper"><button type="button" data-q="-1">−</button><input class="inp" id="s-qty" value="${esc(qty)}" placeholder="1"><button type="button" data-q="1">+</button></div>
+      ${(() => { const s = splitQty(qty); return qtyField(s.raw || s.n, s.u); })()}
       <label class="field"><span>Notiz</span><input id="s-note" value="${esc(x.note || '')}" placeholder="z. B. die Barista-Sorte"></label>
       <div class="btn-row"><button class="btn primary" data-act="buy">Abhaken</button><button class="btn danger" data-act="delete">Löschen</button></div>
     </div>`, async () => {
     const cur = await db.get('shopping', x.id); if (!cur) return;
-    const title = $('#s-title').value.trim() || cur.title, q = $('#s-qty').value.trim(), note = $('#s-note').value.trim();
+    const title = $('#s-title').value.trim() || cur.title, q = joinQty($('#qN').value, unitOf(sheet)), note = $('#s-note').value.trim();
     if (title !== cur.title || q !== (cur.qty || '') || note !== (cur.note || '')) { await db.put('shopping', { ...cur, title, qty: q, note, emoji: title !== cur.title ? emoOf(title) : cur.emoji }); await changed(SHOP); }
   });
   bindClose();
-  sheet.querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', () => {
-    const el = $('#s-qty'); const m = el.value.match(/^(\d+)(.*)$/);
-    const n = m ? +m[1] : (el.value ? NaN : 1);
-    if (!Number.isFinite(n)) return;
-    const next = Math.max(1, n + +b.dataset.q); el.value = String(next) + (m ? m[2] : '');
-  }));
+  sheet.querySelectorAll('[data-unit]').forEach((b) => b.addEventListener('click', () => setUnit(sheet, b.dataset.unit)));
   sheet.querySelector('[data-act="buy"]').onclick = async () => { await closeSheet(); buyShop(x); };
   sheet.querySelector('[data-act="delete"]').onclick = async () => {
     await closeSheet(true);
@@ -687,9 +741,9 @@ function cmpHtml(type, v) {
   if (type === 'shop') {
     const q = quickShop();
     return `<div class="kk"><span>Auf die Liste</span>${x}</div><div class="fld"><span class="em" id="fE">🛒</span><input id="fT" placeholder="Was fehlt?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></div>
-      <div class="chips">${['1', '2', '3', '6', '500 g', '1 kg'].map((qq) => chip('qty', qq, false)).join('')}</div>
+      ${qtyField('', 'Stück')}
       ${q.length ? `<div class="lab">Oft gekauft · antippen setzt es sofort drauf</div><div class="chips">${q.map(([e, t]) => chip('quick', e + ' ' + t, false, 'q')).join('')}</div>` : ''}
-      <div class="foot"><span class="dest">Landet auf der Liste</span><button type="button" class="go" id="fGo" disabled>Hinzufügen</button></div>`;
+      <div class="foot"><span class="dest">Landet auf der Liste. Rezept-Links gehen auch.</span><button type="button" class="go" id="fGo" disabled>Hinzufügen</button></div>`;
   }
   if (type === 'money') {
     return `<div class="kk"><span>Neue Ausgabe</span>${x}</div><div class="amt"><input id="fA" inputmode="decimal" placeholder="0,00" enterkeyhint="next" autocomplete="off"><span>€</span></div><div class="sep"></div>
@@ -723,7 +777,10 @@ function cmpRefresh() {
   if (cmpCtx.type === 'shop') {
     const e = t.trim() ? emoOf(t) : '🛒', el = q('#fE');
     if (el.textContent !== e) { el.textContent = e; el.classList.add('bump'); setTimeout(() => el.classList.remove('bump'), 250); }
-    if (!manual.qty) { const m = t.match(/^\s*(\d+)\s*(g|kg|l|x)?\b/i); pick('qty', m ? (m[2] && /kg/i.test(m[2]) ? '1 kg' : m[2] && /^g$/i.test(m[2]) ? '500 g' : m[1]) : null, !!m); }
+    const link = isLink(t); cmp.classList.toggle('link', link);
+    const dEl = q('.foot .dest'); if (dEl) dEl.textContent = link ? 'Rezept-Link: Zutaten werden erkannt' : 'Landet auf der Liste. Rezept-Links gehen auch.';
+    if (go) go.textContent = link ? 'Zutaten holen' : 'Hinzufügen';
+    if (!manual.qty && !link) { const m = t.match(/^\s*(\d+(?:[.,]\d+)?)\s*(stück|stk\.?|x|kg|g|ml|l)?\s+\S/i); const s = m ? splitQty(m[1] + (m[2] ? ' ' + m[2] : '')) : { n: '', u: 'Stück' }; q('#qN').value = s.n; setUnit(cmp, s.u); }
     go.disabled = !t.trim();
   }
   if (cmpCtx.type === 'money') {
@@ -764,7 +821,7 @@ function placeCmp(first) {
 }
 if (window.visualViewport) { visualViewport.addEventListener('resize', () => placeCmp()); visualViewport.addEventListener('scroll', () => placeCmp()); }
 cmp.addEventListener('change', (e) => { if (e.target.id === 'fW') { manual.when = true; cmpRefresh(); } });
-cmp.addEventListener('input', (e) => { if (e.target.id === 'fW') manual.when = true; if (e.target.id === 'fA') e.target.value = e.target.value.replace(/[^\d,.]/g, ''); cmpRefresh(); });
+cmp.addEventListener('input', (e) => { if (e.target.id === 'fW') manual.when = true; if (e.target.id === 'qN') { manual.qty = true; e.target.value = e.target.value.replace(/[^\d,.]/g, ''); } if (e.target.id === 'fA') e.target.value = e.target.value.replace(/[^\d,.]/g, ''); cmpRefresh(); });
 cmp.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeCmp(); return; }
   if (e.key === 'Enter' && !(e.target.tagName === 'TEXTAREA' && e.shiftKey)) {
@@ -779,6 +836,7 @@ cmp.addEventListener('click', (e) => {
   if (b.dataset.act === 'clr') { manual.when = true; q('#fW').value = ''; cmpRefresh(); return; }
   if (b.id === 'fGo') { submitCmp(); return; }
   const g = b.dataset.g; if (!g) return;
+  if (b.dataset.unit) { manual.qty = true; setUnit(cmp, b.dataset.unit); const n = q('#qN'); if (n && !n.value) try { n.focus({ preventScroll: true }); } catch { /* egal */ } return; }
   if (g === 'quick') { const [em, ...rest] = b.dataset.v.split(' '); quickAdd(em, rest.join(' '), b); return; }
   if (g === 'scan') { closeCmp(); chooseSource(); return; }
   manual[g] = true; const was = b.classList.contains('on'); pick(g, (was && g !== 'when') ? null : b.dataset.v); cmpRefresh();
@@ -801,8 +859,10 @@ async function submitCmp() {
     await changed(TODO, { [id]: rect });
     setTimeout(() => { const t = data.todos.find((x) => x.id === id); const nv = t && t.pos ? t.pos.v : 0; if (nv !== v) toast(`Liegt ${nv < 0 ? 'links' : nv > 0 ? 'rechts' : 'in der Mitte'}`, { action: 'Zeigen', onAction: () => weg.setView(nv) }); }, 300);
   } else if (type === 'shop') {
-    let t = q('#fT').value.trim(); let qty = chosen('qty');
-    const m = t.match(/^\s*(\d+)\s*(g|kg|l|x)?\s+/i); if (m) { t = t.slice(m[0].length); qty = qty || (m[1] + (m[2] && !/x/i.test(m[2]) ? ' ' + m[2] : '')); }
+    let t = q('#fT').value.trim();
+    if (isLink(t)) { closeCmp(); recipeFromLink(t); return; }
+    const qty = joinQty(q('#qN').value, unitOf(cmp));
+    const m = t.match(/^\s*(\d+(?:[.,]\d+)?)\s*(stück|stk\.?|x|kg|g|ml|l)?\s+/i); if (m && !manual.qty) t = t.slice(m[0].length) || t;
     closeCmp(); await addShop({ title: cap(t), qty: qty || '' }, rect);
   } else if (type === 'money') {
     const a = amount(); const t = q('#fT').value.trim(); const c = catByName(chosen('cat'));

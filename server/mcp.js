@@ -2,6 +2,8 @@
 // Projekten ausarbeiten, Projekte pflegen, Aufgaben anlegen und den Einkaufszettel führen.
 // Die App holt sich die Änderungen beim nächsten Abgleich.
 
+import { splitQty, joinQty, mergeQty, looseKey, recipeFromUrl, parseIngredient, combine } from './recipe.js';
+
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 const STATUS = {
@@ -137,10 +139,26 @@ const TOOLS = [
       type: 'object',
       properties: {
         title: { type: 'string' },
-        quantity: { type: 'string', description: 'e.g. "2", "500 g", "1 Packung" (optional)' },
+        amount: { type: 'number', description: 'optional amount, e.g. 2 or 500 or 1.5' },
+        unit: { type: 'string', enum: ['Stück', 'g', 'kg', 'ml', 'l'], description: 'unit for amount, default "Stück"' },
+        quantity: { type: 'string', description: 'legacy free text like "1 Packung"; prefer amount + unit' },
         note: { type: 'string', description: 'optional, e.g. "die Barista-Sorte"' },
       },
       required: ['title'],
+    },
+  },
+  {
+    name: 'add_recipe_to_shopping',
+    title: 'Rezept auf die Einkaufsliste',
+    description: 'Puts the ingredients of a recipe on Vale\'s shopping list. Either pass a recipe url (e.g. Chefkoch; the server reads the ingredient list) or pass ingredients yourself. Things already on the list are merged and their amounts added (g/kg and ml/l are converted). Pantry staples like salt, pepper, oil, flour and spoon amounts (EL/TL/Prise) are skipped unless include_pantry is true. Optional servings_factor scales amounts (e.g. 0.5 for half the recipe). Only when Vale asks for it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'link to a recipe page' },
+        ingredients: { type: 'array', description: 'instead of url: the ingredients', items: { type: 'object', properties: { title: { type: 'string' }, amount: { type: 'number' }, unit: { type: 'string', enum: ['Stück', 'g', 'kg', 'ml', 'l'] }, text: { type: 'string', description: 'or a raw line like "200 g Mehl"' } } } },
+        include_pantry: { type: 'boolean', default: false },
+        servings_factor: { type: 'number', description: 'scale amounts, default 1' },
+      },
     },
   },
   {
@@ -245,7 +263,7 @@ async function callTool(store, name, a = {}) {
     case 'list_shopping': {
       const all = await store.list('shopping');
       const open = all.filter((x) => !x.bought).sort((x, y) => (x.order ?? -1) - (y.order ?? -1) || (y.createdAt || 0) - (x.createdAt || 0));
-      const out = { list: open.map((x) => ({ id: x.id, title: x.title, quantity: x.qty || '', note: x.note || '' })) };
+      const out = { list: open.map((x) => { const q = splitQty(x.qty); return { id: x.id, title: x.title, quantity: x.qty || '', ...(q ? { amount: q.n, unit: q.u } : {}), note: x.note || '' }; }) };
       if (a.include_frequent) {
         const m = new Map();
         for (const x of all) if (x.bought) { const k = normTitle(x.title); m.set(k, { title: x.title, times: ((m.get(k) || {}).times || 0) + 1 }); }
@@ -256,17 +274,42 @@ async function callTool(store, name, a = {}) {
     case 'add_shopping_item': {
       const title = String(a.title || '').trim();
       if (!title) return fail('title fehlt.');
-      const qty = String(a.quantity || '').trim();
-      const same = (await store.list('shopping')).find((x) => !x.bought && normTitle(x.title) === normTitle(title));
+      const qty = Number.isFinite(+a.amount) && +a.amount > 0 ? joinQty(a.amount, a.unit) : String(a.quantity || '').trim();
+      const same = (await store.list('shopping')).find((x) => !x.bought && looseKey(x.title) === looseKey(title));
       if (same) {
-        const n = parseInt(same.qty, 10), add = parseInt(qty, 10) || 1;
-        const numeric = !same.qty || /^\d+$/.test(String(same.qty).trim());
-        const next = numeric ? String((Number.isFinite(n) ? n : 1) + add) : same.qty;
+        const next = mergeQty(same.qty || '1', qty || '1');
         const rec = await store.upsert('shopping', { ...same, qty: next, ...(a.note ? { note: String(a.note).trim() } : {}) });
         return text({ merged: { id: rec.id, title: rec.title, quantity: rec.qty }, hint: 'Stand schon auf der Liste, Menge erhöht.' });
       }
       const rec = await store.upsert('shopping', { title: title.charAt(0).toUpperCase() + title.slice(1), qty, note: String(a.note || '').trim(), bought: false, by: 'claude' });
       return text({ added: { id: rec.id, title: rec.title, quantity: rec.qty }, hint: 'Erscheint in der App beim nächsten Abgleich.' });
+    }
+    case 'add_recipe_to_shopping': {
+      let name = '', items = [];
+      if (a.url) {
+        try { const r = await recipeFromUrl(a.url); name = r.name; items = r.items; } catch (e) { return fail(e.message); }
+      } else if (Array.isArray(a.ingredients) && a.ingredients.length) {
+        items = combine(a.ingredients.map((x) => (x && x.text ? parseIngredient(x.text)
+          : x && x.title ? { title: String(x.title).trim(), qty: Number.isFinite(+x.amount) && +x.amount > 0 ? joinQty(x.amount, x.unit) : '', pantry: false } : null)));
+      } else return fail('url oder ingredients angeben.');
+      const f = Number(a.servings_factor) > 0 ? Number(a.servings_factor) : 1;
+      const skipped = items.filter((x) => x.pantry && !a.include_pantry).map((x) => x.title);
+      const use = items.filter((x) => a.include_pantry || !x.pantry);
+      const open = (await store.list('shopping')).filter((x) => !x.bought);
+      const added = [], merged = [];
+      for (const it of use) {
+        let qty = it.qty; const s = splitQty(qty);
+        if (s && f !== 1) qty = joinQty(s.u === 'Stück' ? Math.ceil(s.n * f) : s.n * f, s.u);
+        const same = open.find((x) => looseKey(x.title) === looseKey(it.title));
+        if (same) {
+          const rec = await store.upsert('shopping', { ...same, qty: qty ? mergeQty(same.qty || '1', qty) : same.qty });
+          Object.assign(same, rec); merged.push(`${rec.title}${rec.qty ? ' (' + rec.qty + ')' : ''}`);
+        } else {
+          const rec = await store.upsert('shopping', { title: it.title, qty, note: '', bought: false, by: 'claude' });
+          open.push(rec); added.push(`${rec.title}${rec.qty ? ' (' + rec.qty + ')' : ''}`);
+        }
+      }
+      return text({ recipe: name || undefined, added, merged, skipped_pantry: skipped, hint: 'Erscheint in der App beim nächsten Abgleich.' });
     }
     case 'remove_shopping_item': {
       const cur = await store.get('shopping', a.id);

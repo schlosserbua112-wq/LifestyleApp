@@ -209,3 +209,20 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: rgba(29,35
 .wc .yr.wd + .yrl { gap: 6px; }
 .wc.m .s { white-space: normal; overflow: visible; }
 .wc.m .row .s .dl { margin-left: 4px; }
+
+/* Menge: Zahl + Einheit */
+.qtyf { display: flex; align-items: stretch; gap: 8px; }
+.qtyf .qn { width: 78px; flex: none; border: 0; outline: none; border-radius: 14px; background: #fff; box-shadow: inset 0 0 0 1.5px rgba(29,35,32,.14); padding: 0 12px; min-height: 44px; font: 600 18px/1 var(--sans); color: var(--ink); text-align: center; font-variant-numeric: tabular-nums; -webkit-appearance: none; appearance: none; }
+.qtyf .qn::placeholder { font: 500 13px/1 var(--sans); color: var(--ink3); }
+.qtyf .qn:focus { box-shadow: inset 0 0 0 2px var(--acc); }
+.qtyf .units { flex: 1; display: flex; padding: 3px; gap: 2px; border-radius: 14px; background: rgba(29,35,32,.06); min-width: 0; }
+.qtyf .units button { flex: 1; min-width: 0; border: 0; border-radius: 11px; background: none; font: 600 13px/1 var(--sans); color: var(--ink2); padding: 0 2px; transition: background .2s, color .2s, box-shadow .2s; }
+.qtyf .units button.on { background: #fff; color: var(--acc); box-shadow: 0 1px 3px rgba(20,30,20,.14), 0 0 0 1px rgba(20,30,20,.04); }
+.cmp .qtyf { margin: 2px 0 4px; }
+
+/* Rezept-Link */
+.cmp.link .qtyf { opacity: .35; pointer-events: none; }
+.lrow.rcp .rck { width: 24px; height: 24px; border-radius: 50%; border: 1.8px solid rgba(29,35,32,.25); flex: none; position: relative; transition: background .15s, border-color .15s; }
+.lrow.rcp.sel .rck { background: var(--acc); border-color: var(--acc); }
+.lrow.rcp.sel .rck::after { content: ''; position: absolute; left: 7px; top: 3px; width: 6px; height: 11px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.lrow.rcp:not(.sel) .title { color: var(--ink3); }
