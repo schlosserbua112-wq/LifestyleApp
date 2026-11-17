@@ -1,7 +1,7 @@
 // Kleiner Wrapper um IndexedDB. Alle Daten bleiben auf dem Gerät.
 
 const DB_NAME = 'lifestyle';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let dbPromise;
 
 function open() {
@@ -12,6 +12,7 @@ function open() {
       const db = req.result;
       if (!db.objectStoreNames.contains('todos')) db.createObjectStore('todos', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('ideas')) db.createObjectStore('ideas', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('shopping')) db.createObjectStore('shopping', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('receipts')) {
         const s = db.createObjectStore('receipts', { keyPath: 'id' });
         s.createIndex('date', 'date');
@@ -34,9 +35,9 @@ function tx(store, mode, fn) {
   }));
 }
 
-// To-Dos und Ideen werden mit dem Server abgeglichen. Gelöschte Einträge bleiben dafür als
+// Aufgaben, Ideen/Projekte und der Einkauf werden mit dem Server abgeglichen. Gelöschte Einträge bleiben dafür als
 // "Grabstein" (deleted: true) liegen und werden in der App ausgeblendet.
-export const SYNCED = ['todos', 'ideas'];
+export const SYNCED = ['todos', 'ideas', 'shopping'];
 const PENDING_KEY = 'lifestyle.sync.pending';
 
 export function pendingIds() {
@@ -104,9 +105,10 @@ export async function exportAll() {
   const todos = await db.all('todos');
   const receipts = await db.all('receipts');
   const ideas = await db.all('ideas');
+  const shopping = await db.all('shopping');
   const out = [];
   for (const r of receipts) out.push({ ...r, image: r.image ? await blobToDataURL(r.image) : null });
-  return { app: 'lifestyle', version: 1, exportedAt: new Date().toISOString(), todos, ideas, receipts: out };
+  return { app: 'lifestyle', version: 1, exportedAt: new Date().toISOString(), todos, ideas, shopping, receipts: out };
 }
 
 export async function importAll(data) {
@@ -120,6 +122,7 @@ export async function importAll(data) {
   };
   for (const t of data.todos || []) { await keep('todos', t); count++; }
   for (const i of data.ideas || []) { await keep('ideas', i); count++; }
+  for (const x of data.shopping || []) { await keep('shopping', x); count++; }
   for (const r of data.receipts || []) {
     await db.put('receipts', { ...r, image: r.image ? await dataURLToBlob(r.image) : null });
     count++;
