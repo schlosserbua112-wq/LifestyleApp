@@ -664,20 +664,59 @@ function editReceipt(r, hint) {
 }
 function chooseSource() {
   openSheet(`${sheetHead('Beleg scannen', '<button class="link" data-act="close">Abbrechen</button>')}<div class="sbody"><div style="display:grid;gap:10px">
-    <button class="btn primary block" data-act="camera">📷 Foto aufnehmen</button><button class="btn block" data-act="gallery">🖼️ Aus Fotos wählen</button></div>
-    <p class="hint" style="margin-top:14px">Bon flach auf einen dunklen Untergrund legen und gerade von oben fotografieren. Die Texterkennung läuft auf deinem iPhone.</p></div>`);
+    <button class="btn primary block" data-act="camera">📷 Foto aufnehmen</button>
+    <button class="btn block" data-act="long">🧾 Langer Bon: in Teilen fotografieren</button>
+    <button class="btn block" data-act="gallery">🖼️ Aus Fotos wählen</button></div>
+    <p class="hint" style="margin-top:14px">Bon flach auf einen dunklen Untergrund legen und gerade von oben fotografieren. Ist er so lang, dass die Schrift auf einem Foto winzig wird, nimm ihn in zwei oder drei Teilen von oben nach unten auf. Aus Fotos kannst du auch mehrere Teile auf einmal wählen. Die Texterkennung läuft auf deinem iPhone.</p></div>`);
   bindClose();
-  sheet.querySelector('[data-act="camera"]').onclick = () => { closeSheet(true); $('#camera').click(); };
-  sheet.querySelector('[data-act="gallery"]').onclick = () => { closeSheet(true); $('#gallery').click(); };
+  sheet.querySelector('[data-act="camera"]').onclick = () => { closeSheet(true); scanParts = null; $('#camera').click(); };
+  sheet.querySelector('[data-act="long"]').onclick = () => { closeSheet(true); scanParts = []; $('#camera').click(); };
+  sheet.querySelector('[data-act="gallery"]').onclick = () => { closeSheet(true); scanParts = null; $('#gallery').click(); };
+}
+// Langer Bon: Teile sammeln, nach jedem Foto fragen, ob noch einer kommt
+let scanParts = null;
+function morePartsSheet() {
+  const n = scanParts.length;
+  openSheet(`${sheetHead(`Teil ${n} aufgenommen`, '<button class="link" data-act="close">Abbrechen</button>')}<div class="sbody">
+    <p class="hint">Fotografier als Nächstes das Stück direkt darunter. Ein bisschen Überlappung ist gut.</p>
+    <div style="display:grid;gap:10px"><button class="btn primary block" data-act="next">📷 Teil ${n + 1} fotografieren</button>
+    <button class="btn block" data-act="done">Fertig, auswerten</button></div></div>`);
+  sheet.querySelector('[data-act="close"]').onclick = () => { scanParts = null; closeSheet(true); };
+  sheet.querySelector('[data-act="next"]').onclick = () => { closeSheet(true); $('#camera').click(); };
+  sheet.querySelector('[data-act="done"]').onclick = async () => { const files = scanParts; scanParts = null; await closeSheet(true); await scanFiles(files); };
 }
 for (const id of ['camera', 'gallery']) {
-  $('#' + id).addEventListener('change', async (e) => { const file = e.target.files && e.target.files[0]; e.target.value = ''; if (file) await scanFile(file); });
+  $('#' + id).addEventListener('change', async (e) => {
+    const files = [...(e.target.files || [])]; e.target.value = ''; if (!files.length) return;
+    if (id === 'camera' && scanParts) { scanParts.push(files[0]); morePartsSheet(); return; }
+    await scanFiles(files);
+  });
 }
-async function scanFile(file) {
-  openSheet(`<div class="sbody"><div class="progress"><div class="spinner"></div><p id="scan-status" style="margin:14px 0 0;font-weight:600">Bereite Foto vor …</p><div class="bar"><div id="scan-bar"></div></div><p class="small muted">Die Texterkennung läuft komplett auf deinem iPhone.</p></div></div>`);
+// Mehrere Fotos eines Bons untereinander zu einem Bild zusammensetzen (zum Ablegen beim Beleg)
+async function stackPhotos(blobs) {
+  if (blobs.length < 2) return blobs[0] || null;
+  const bms = await Promise.all(blobs.map((b) => createImageBitmap(b)));
+  const w = Math.min(1100, Math.max(...bms.map((b) => b.width)));
+  let hs = bms.map((b) => Math.round(b.height * (w / b.width))), H = hs.reduce((a, b) => a + b, 0);
+  const k = Math.min(1, 14000 / H); hs = hs.map((h) => Math.round(h * k)); H = hs.reduce((a, b) => a + b, 0);
+  const cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = H;
+  const ctx = cv.getContext('2d'); let y = 0;
+  bms.forEach((b, i) => { ctx.drawImage(b, 0, y, cv.width, hs[i]); y += hs[i]; if (b.close) b.close(); });
+  return new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.78));
+}
+async function scanFiles(files) {
+  openSheet(`<div class="sbody"><div class="progress"><div class="spinner"></div><p id="scan-status" style="margin:14px 0 0;font-weight:600">Bereite Foto vor …</p><div class="bar"><div id="scan-bar"></div></div><p class="small muted">Die Texterkennung läuft komplett auf deinem iPhone. Bei langen Bons dauert das etwas.</p></div></div>`);
   const setProgress = (msg, p) => { const s = $('#scan-status'); const b = $('#scan-bar'); if (s) s.textContent = msg; if (b) b.style.width = Math.round(p * 100) + '%'; };
   let photo = null, parsed = { merchant: '', date: null, total: null, category: 'sonstiges' }, text = '', failed = false;
-  try { const prep = await prepareImage(file); photo = prep.photo; text = await recognize(prep.ocrCanvas, setProgress); parsed = parseReceipt(text); } catch (err) { console.error(err); failed = true; }
+  try {
+    const photos = [], strips = [];
+    for (let i = 0; i < files.length; i++) {
+      setProgress(files.length > 1 ? `Bereite Foto ${i + 1} von ${files.length} vor …` : 'Bereite Foto vor …', 0.05 + (i / files.length) * 0.2);
+      const prep = await prepareImage(files[i]); photos.push(prep.photo); strips.push(...prep.strips);
+    }
+    photo = await stackPhotos(photos);
+    text = await recognize(strips, setProgress); parsed = parseReceipt(text);
+  } catch (err) { console.error(err); failed = true; }
   await closeSheet(true);
   editReceipt({ id: uid(), merchant: parsed.merchant, date: parsed.date || toISODate(new Date()), total: parsed.total, category: parsed.category, note: '', image: photo, ocrText: text, createdAt: Date.now(), isNew: true },
     failed ? 'Die Texterkennung hat nicht geklappt. Trag die Werte bitte von Hand ein.' : 'Automatisch erkannt. Bitte kurz prüfen, vor allem den Betrag.');
