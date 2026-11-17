@@ -149,7 +149,6 @@ function moneyItems() {
   if (prev.total > 0 && cur.total > 0) { const p = Math.round((cur.total - prev.total) / prev.total * 100); delta = `${Math.abs(p)} % ${p > 0 ? 'mehr' : 'weniger'} als ${monthLabel(shiftMonth(m, -1)).split(' ')[0]}`; }
   items.push({ key: 'total', v: 0, html: `<div class="k">Ausgegeben im ${esc(mName)}</div><div class="big">${esc(euro(cur.total))}</div><div class="s">${esc(delta)}</div>` });
   const last = [...cur.rs].sort((a, b) => (a.date === b.date ? (b.createdAt || 0) - (a.createdAt || 0) : a.date < b.date ? 1 : -1)).slice(0, 3);
-  items.push({ key: 'scan', v: 0, cls: 'scan', html: `<div class="t">📷 Beleg scannen</div><div class="s">Betrag wird erkannt</div>` });
   if (last.length) items.push({ key: 'last', v: 0, html: `<div class="k">Zuletzt</div>${last.map((r) => `<div class="s" style="margin-top:6px;color:var(--ink)">${esc(r.merchant || CAT[r.category]?.name || 'Ausgabe')} · <b>${esc(euro(r.total))}</b></div>`).join('')}` });
   if (data.receipts.length) items.push({ key: 'search', v: 0, html: `<div class="t">🔍 Belege durchsuchen</div><div class="s">${data.receipts.length} insgesamt</div>` });
   // Rechts: das Jahr
@@ -243,7 +242,6 @@ async function onCardTap(h) {
       refresh(MONEY); toast(`${monthLabel(state.month)} gewählt`, { action: 'Zeigen', onAction: () => weg.setView(0) });
       return;
     }
-    if (key === 'scan') return chooseSource();
     if (key === 'search' || key === 'last' || key === 'total') return receiptsSheet();
     if (key === 'ymax') return;
   }

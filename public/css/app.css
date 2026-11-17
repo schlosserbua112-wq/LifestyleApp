@@ -193,8 +193,3 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: rgba(29,35
 .datef.pulse { animation: dpulse .5s; }
 @keyframes dpulse { 40% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--acc) 30%, transparent); } }
 .cmp .datef { margin-bottom: 2px; }
-
-/* Belegscanner-Karte in Finanzen */
-.wc.scan { background: var(--acc); color: #fff; }
-.wc.scan .t { color: #fff; }
-.wc.scan .s { color: rgba(255,255,255,.82); }
