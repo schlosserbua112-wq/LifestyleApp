@@ -1,10 +1,10 @@
-// Gemeinsamer Datenstand für To-Dos und Ideen (iPhone und Claude-Connector).
+// Gemeinsamer Datenstand für Aufgaben, Ideen/Projekte und den Einkauf (iPhone und Claude-Connector).
 // Eine JSON-Datei reicht für eine persönliche App völlig.
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export const STORES = ['todos', 'ideas'];
+export const STORES = ['todos', 'ideas', 'shopping'];
 
 export function mergeLog(a = [], b = []) {
   const seen = new Map();
@@ -26,8 +26,9 @@ export class Store {
       this.data = JSON.parse(await readFile(this.file, 'utf8'));
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
-      this.data = { rev: 0, todos: {}, ideas: {} };
+      this.data = { rev: 0 };
     }
+    for (const s of STORES) if (!this.data[s]) this.data[s] = {};
     return this.data;
   }
 
@@ -97,6 +98,11 @@ export class Store {
     if (!r || r.deleted) return null;
     const { _rev, ...rest } = r;
     return rest;
+  }
+
+  // Löschen: als Grabstein (deleted) speichern, damit das iPhone es beim Abgleich mitbekommt.
+  async remove(store, id) {
+    return this.write((d) => { this.applyRecord(d, store, { id, deleted: true, updatedAt: Date.now() }); });
   }
 
   async upsert(store, rec) {
