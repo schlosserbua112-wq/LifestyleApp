@@ -680,7 +680,7 @@ function settingsSheet() {
   openSheet(`${sheetHead('Einstellungen')}<div class="sbody">
     <p class="small" style="margin:0 0 6px"><span class="status-dot ${s.syncError ? 'err' : s.syncAt ? 'ok' : ''}"></span>Abgleich mit Claude: <b>${esc(when(s.syncAt))}</b>${s.syncError ? `<br><span style="color:var(--warn)">${esc(s.syncError)}</span>` : ''}</p>
     <p class="small" style="margin:0"><span class="status-dot ${s.lastError ? 'err' : s.lastAt ? 'ok' : ''}"></span>Letzte Sicherung: <b>${esc(when(s.lastAt))}</b>${s.lastError ? `<br><span style="color:var(--warn)">${esc(s.lastError)}</span>` : ''}</p>
-    <label class="field"><span>Server-Schlüssel</span><input id="b-token" type="password" autocomplete="off" value="${esc(s.token)}" placeholder="vom Server (BACKUP_TOKEN)"></label>
+    <label class="field"><span>Server-Schlüssel</span><input id="b-token" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(s.token)}" placeholder="vom Server (BACKUP_TOKEN)"></label>
     <label class="field"><span>Server-Adresse (leer = diese Seite)</span><input id="b-url" inputmode="url" autocomplete="off" value="${esc(s.url)}" placeholder="${esc(location.origin)}"></label>
     <label class="check-row"><input id="b-auto" type="checkbox" ${s.auto ? 'checked' : ''}><span>Automatisch sichern, wenn Internet da ist</span></label>
     <div class="btn-row"><button class="btn primary" id="b-now">Jetzt sichern</button><button class="btn" id="b-sync">Abgleichen</button><button class="btn" id="b-restore">Wiederherstellen</button></div>
@@ -694,7 +694,7 @@ function settingsSheet() {
   </div>`, () => refresh(MORE));
   bindClose();
   const save = () => backupSettings.set({ token: $('#b-token').value.trim(), url: $('#b-url').value.trim(), auto: $('#b-auto').checked });
-  ['b-token', 'b-url', 'b-auto'].forEach((id) => $('#' + id).addEventListener('change', save));
+  ['b-token', 'b-url', 'b-auto'].forEach((id) => { $('#' + id).addEventListener('change', save); $('#' + id).addEventListener('input', save); });
   $('#b-now').onclick = async (e) => {
     save(); e.target.disabled = true; e.target.textContent = 'Sichere …';
     try { const bytes = await uploadBackup(); toast(`Gesichert (${(bytes / 1024 / 1024).toFixed(1)} MB)`); } catch (err) { backupSettings.set({ lastError: err.message }); toast(navigator.onLine ? err.message : 'Kein Internet. Sicherung später.'); }

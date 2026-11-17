@@ -12,11 +12,13 @@ import { recipeFromUrl } from './recipe.js';
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = process.env.PUBLIC_DIR || new URL('../public', import.meta.url).pathname;
 const DATA_DIR = process.env.DATA_DIR || '/data';
-const TOKEN = process.env.BACKUP_TOKEN || '';
+// Schlüssel säubern: Leerzeichen, Zeilenumbrüche und Anführungszeichen aus dem Einfügen in Coolify entfernen
+const cleanSecret = (v) => String(v || '').trim().replace(/^(['"])(.*)\1$/s, '$2').trim();
+const TOKEN = cleanSecret(process.env.BACKUP_TOKEN);
 const KEEP = Number(process.env.BACKUP_KEEP || 30);
 const MAX_BODY = Number(process.env.BACKUP_MAX_MB || 300) * 1024 * 1024;
 const BACKUP_DIR = join(DATA_DIR, 'backups');
-const MCP_TOKEN = process.env.MCP_TOKEN || '';
+const MCP_TOKEN = cleanSecret(process.env.MCP_TOKEN);
 const store = new Store(DATA_DIR);
 
 const TYPES = {
@@ -44,7 +46,7 @@ function same(given, secret) {
   const b = createHash('sha256').update(secret).digest();
   return timingSafeEqual(a, b);
 }
-const bearer = (req) => { const h = req.headers.authorization || ''; return h.startsWith('Bearer ') ? h.slice(7) : ''; };
+const bearer = (req) => { const m = String(req.headers.authorization || '').match(/^\s*bearer\s+(.+)$/i); return m ? cleanSecret(m[1]) : ''; };
 const authorized = (req) => same(bearer(req), TOKEN);
 
 async function readBody(req) {
@@ -65,7 +67,11 @@ async function listBackups() {
 
 async function handleApi(req, res, path) {
   if (!TOKEN) return json(res, 503, { error: 'BACKUP_TOKEN ist auf dem Server nicht gesetzt.' });
-  if (!authorized(req)) return json(res, 401, { error: 'Nicht berechtigt.' });
+  if (!authorized(req)) {
+    // Hilft beim Einrichten: nur die Längen, nie der Schlüssel selbst
+    const got = bearer(req);
+    return json(res, 401, { error: 'Nicht berechtigt.', hint: got ? `Gesendet: ${got.length} Zeichen, Server erwartet ${TOKEN.length} Zeichen.` : 'Kein Schlüssel gesendet.' });
+  }
 
   if (path === '/api/backup' && req.method === 'POST') {
     const body = await readBody(req);
@@ -142,7 +148,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname);
     if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
       // Geheimnis in der Adresse (/mcp/<MCP_TOKEN>) oder als Bearer-Header.
-      const ok = same(pathname.slice(5), MCP_TOKEN) || same(bearer(req), MCP_TOKEN);
+      const ok = same(cleanSecret(decodeURIComponent(pathname.slice(5))), MCP_TOKEN) || same(bearer(req), MCP_TOKEN);
       if (!ok) return json(res, MCP_TOKEN ? 401 : 503, { error: MCP_TOKEN ? 'Nicht berechtigt.' : 'MCP_TOKEN ist nicht gesetzt.' });
       const body = req.method === 'POST' ? (await readBody(req)).toString('utf8') : '';
       return await handleMcp(store, req, res, body, send);
