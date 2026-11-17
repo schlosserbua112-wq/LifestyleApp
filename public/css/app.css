@@ -93,7 +93,8 @@ button { border: 0; background: none; padding: 0; cursor: pointer; }
 .cmp .amt span { font: 500 28px/1 var(--serif); color: var(--ink2); }
 .cmp .sep { height: 1px; background: var(--line); margin: 2px 0 10px; }
 .cmp .lab { font: 650 10px/1 var(--sans); letter-spacing: .12em; text-transform: uppercase; color: var(--ink2); margin: 12px 0 7px; }
-.cmp .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 16px 2px; touch-action: pan-x; flex-wrap: nowrap; }
+/* Auswahl bricht um statt seitlich zu scrollen: auf dem iPhone ließ sich die Zeile im Fenster nicht wischen. */
+.cmp .chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 0 2px; }
 .cmp .chips::-webkit-scrollbar { display: none; }
 .cmp .foot { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
 .cmp .foot .dest { flex: 1; font: 500 12.5px/1.3 var(--sans); color: var(--ink2); }
@@ -193,8 +194,3 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: rgba(29,35
 .datef.pulse { animation: dpulse .5s; }
 @keyframes dpulse { 40% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--acc) 30%, transparent); } }
 .cmp .datef { margin-bottom: 2px; }
-
-/* Belegscanner-Karte in Finanzen */
-.wc.scan { background: var(--acc); color: #fff; }
-.wc.scan .t { color: #fff; }
-.wc.scan .s { color: rgba(255,255,255,.82); }
