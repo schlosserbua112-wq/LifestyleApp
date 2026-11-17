@@ -384,6 +384,17 @@ async function closeSheet(skipHandler) {
   setTimeout(() => { if (!sheet.classList.contains('on')) sheet.innerHTML = ''; }, 400);
 }
 veil.addEventListener('pointerup', () => closeSheet());
+// Schutz für Knöpfe im Blatt: Ein Klick zählt nur, wenn der Finger auch auf genau diesem Knopf aufgesetzt hat und
+// nicht gerade ein Auswahlrad oder die Tastatur zugegangen ist. Sonst rutscht z. B. das Schließen des iPhone-
+// Einheitenrads als Tipp auf „Abhaken“ durch.
+let sheetDown = null, fieldAt = 0;
+sheet.addEventListener('pointerdown', (e) => { sheetDown = { el: e.target.closest('button'), at: Date.now() }; }, true);
+for (const ev of ['change', 'focusout']) sheet.addEventListener(ev, (e) => { if (e.target.matches && e.target.matches('select')) fieldAt = Date.now(); }, true);
+sheet.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]:not([data-act="close"])'); if (!b) return;
+  const ok = sheetDown && sheetDown.el === b && Date.now() - sheetDown.at < 1500 && Date.now() - fieldAt > 450;
+  if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
 // Blatt am Griff nach unten ziehen schließt es
 function bindSheetDrag() {
   const grab = sheet.querySelector('.grab'), headEl = sheet.querySelector('.shead');
