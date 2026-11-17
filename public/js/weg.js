@@ -717,8 +717,12 @@ function hitTest(x, y) {
 let down = false, lock = null, tx = 0, ty = 0, ts = 0, vel = 0, lt = 0, ly = 0, moved = false, lpT = null, pressIt = null;
 let drag = null;
 const skip = (e) => paused || (e.target.closest && e.target.closest('[data-ui]'));
+// Unterer Rand: dort beginnt die iPhone-Geste zum Schließen/App-Wechseln, die soll den Weg nicht bewegen.
+const EDGE = 30;
+let lastSwipe = null;
 addEventListener('pointerdown', (e) => {
   if (skip(e) || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  if (e.pointerType !== 'mouse' && e.clientY > innerHeight - EDGE) return;
   down = true; moved = false; lock = null; tx = e.clientX; ty = e.clientY; ts = target; vel = 0; lt = performance.now(); ly = e.clientY;
   const h = settled() ? hitTest(tx, ty) : null;
   if (h && !h.it.key.startsWith('__')) {
@@ -759,8 +763,27 @@ function release() {
   const base = Math.round((ts - S0) / SPACING), d = (target - S0) / SPACING - base + Math.max(-1.1, Math.min(1.1, vel * 0.55));
   // Ein Bereich weiter reicht schon ein kurzer Wisch, zum Überspringen braucht es einen langen, kräftigen Zug.
   const a = Math.abs(d), n = a < 0.22 ? 0 : a < 1.75 ? 1 : Math.round(a - 0.75); target = stationS(base + Math.sign(d) * n);
+  if (n) lastSwipe = { from: ((base % N) + N) % N, at: performance.now() };
 }
-addEventListener('pointerup', release); addEventListener('pointercancel', () => { if (drag) endDrag(); down = false; cancelPress(); lock = null; yawDrag = false; });
+addEventListener('pointerup', release);
+addEventListener('pointercancel', () => {
+  if (drag) endDrag();
+  if (down && lock === 'y') target = stationS(Math.round((ts - S0) / SPACING)); // abgebrochener Wisch: zurück zum Bereich
+  down = false; cancelPress(); lock = null; yawDrag = false;
+});
+// App wird geschlossen oder gewechselt: ein Wisch, der gerade erst passiert ist, war die Schließen-Geste. Zurück zum
+// Bereich davor, sofort und ohne Fahrt, damit die App beim nächsten Öffnen dort steht, wo man war.
+function undoLastSwipe() {
+  if (down) { if (drag) endDrag(); down = false; cancelPress(); lock = null; yawDrag = false; }
+  const back = lastSwipe && performance.now() - lastSwipe.at < 1500 ? lastSwipe.from : Math.round(((((target - S0) / SPACING) % N) + N) % N) % N;
+  lastSwipe = null;
+  if (back !== curSt || Math.abs(wrapD(s - stationS(back))) > 1) {
+    s = target = near(back); view = 0; yaw = 0; yawV = 0;
+    if (back !== curSt) { curSt = back; opt.onStation && opt.onStation(back); }
+  }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') undoLastSwipe(); });
+addEventListener('pagehide', undoLastSwipe);
 
 function tap(x, y) {
   if (!settled()) return;
