@@ -31,7 +31,7 @@ const TOOLS = [
   {
     name: 'list_ideas',
     title: 'Gedankenblitze und Projekte auflisten',
-    description: 'Lists entries from the "Projekte" area of Vale\'s Lifestyle app. There are two kinds: kind "blitz" = Gedankenblitz, a short raw note Vale jotted down in the app (only text, no title), and kind "projekt" = a worked-out project. When Vale says "hol meine Gedankenblitze/Ideen", call this with kind "blitz", discuss them, and turn one into a project with promote_idea. Optional filters: kind and a search text.',
+    description: 'Lists entries from the "Projekte" area of Vale\'s Bummel app. There are two kinds: kind "blitz" = Gedankenblitz, a short raw note Vale jotted down in the app (only text, no title), and kind "projekt" = a worked-out project. When Vale says "hol meine Gedankenblitze/Ideen", call this with kind "blitz", discuss them, and turn one into a project with promote_idea. Optional filters: kind and a search text.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,7 +66,7 @@ const TOOLS = [
   {
     name: 'create_idea',
     title: 'Projekt anlegen',
-    description: 'Creates a NEW project (kind "projekt") in the Lifestyle app. Only call this when Vale explicitly asks you to create or save a new project. If it comes from a Gedankenblitz, use promote_idea instead. Check list_ideas first so you do not create a duplicate. Fill the template fields as far as they are known (leave unknown ones empty rather than guessing). Write in German unless Vale asks otherwise.',
+    description: 'Creates a NEW project (kind "projekt") in the Bummel app. Only call this when Vale explicitly asks you to create or save a new project. If it comes from a Gedankenblitz, use promote_idea instead. Check list_ideas first so you do not create a duplicate. Fill the template fields as far as they are known (leave unknown ones empty rather than guessing). Write in German unless Vale asks otherwise.',
     inputSchema: {
       type: 'object',
       properties: { title: { type: 'string', description: 'Titel' }, ...fieldProps },
@@ -91,7 +91,7 @@ const TOOLS = [
   {
     name: 'list_todos',
     title: 'Aufgaben auflisten',
-    description: 'Lists Vale\'s to-dos from the Lifestyle app in Vale\'s own order (overdue and soon due ones first). By default only open ones.',
+    description: 'Lists Vale\'s to-dos from the Bummel app in Vale\'s own order (overdue and soon due ones first). By default only open ones.',
     inputSchema: {
       type: 'object',
       properties: { include_done: { type: 'boolean', default: false } },
@@ -101,7 +101,7 @@ const TOOLS = [
   {
     name: 'create_todo',
     title: 'Aufgabe anlegen',
-    description: 'Adds a to-do to the Lifestyle app. Only call this when Vale asks you to add a task.',
+    description: 'Adds a to-do to the Bummel app. Only call this when Vale asks you to add a task.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -292,8 +292,8 @@ async function handleMessage(store, msg) {
       return reply({
         protocolVersion: PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'lifestyle', title: 'Lifestyle-App', version: '2.0.0' },
-        instructions: 'Zugriff auf Vales persönliche Lifestyle-App: Gedankenblitze und Projekte, Aufgaben und Einkaufsliste. Gedankenblitze sind rohe Notizen, die Vale in der App festhält; auf Wunsch holst du sie mit list_ideas (kind "blitz"), arbeitest sie mit Vale aus und machst sie mit promote_idea zum Projekt. Projekte nach Diskussionen mit update_idea auf den aktuellen Stand bringen. Neues nur anlegen, wenn Vale ausdrücklich darum bittet. Inhalte auf Deutsch schreiben.',
+        serverInfo: { name: 'lifestyle', title: 'Bummel', version: '2.0.0' },
+        instructions: 'Zugriff auf Vales persönliche App Bummel (früher Lifestyle): Gedankenblitze und Projekte, Aufgaben und Einkaufsliste. Gedankenblitze sind rohe Notizen, die Vale in der App festhält; auf Wunsch holst du sie mit list_ideas (kind "blitz"), arbeitest sie mit Vale aus und machst sie mit promote_idea zum Projekt. Projekte nach Diskussionen mit update_idea auf den aktuellen Stand bringen. Neues nur anlegen, wenn Vale ausdrücklich darum bittet. Inhalte auf Deutsch schreiben.',
       });
     }
     case 'ping':

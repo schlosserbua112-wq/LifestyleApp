@@ -1,4 +1,4 @@
-// Lifestyle: Aufgaben, Einkauf, Finanzen und Projekte als Stationen auf einem Weg durch die Stadt.
+// Bummel: Aufgaben, Einkauf, Finanzen und Projekte als Stationen auf einem Weg durch die Stadt.
 // Alle Daten liegen auf dem iPhone (IndexedDB). Aufgaben, Einkauf und Projekte werden mit dem eigenen
 // Server abgeglichen, damit Claude über den Connector mitarbeiten kann.
 import { db, uid, requestPersistence, exportAll, importAll } from './db.js';
@@ -607,7 +607,7 @@ function settingsSheet() {
   };
   $('#f-export').onclick = async () => {
     const d = await exportAll(); const blob = new Blob([JSON.stringify(d)], { type: 'application/json' });
-    const name = `lifestyle-backup-${toISODate(new Date())}.json`; const file = new File([blob], name, { type: 'application/json' });
+    const name = `bummel-backup-${toISODate(new Date())}.json`; const file = new File([blob], name, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (err) { if (err.name === 'AbortError') return; } }
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   };
