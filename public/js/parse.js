@@ -1,7 +1,7 @@
 // Liest Händler, Datum und Gesamtbetrag aus dem erkannten Text eines Kassenbons.
 
 const AMOUNT_RE = /(-?\d{1,5}(?:[.\s]\d{3})*)\s?[,.]\s?(\d{2})(?!\d)/g;
-const TOTAL_WORDS = /(zu\s*zahlen|summe|gesamt|total|endbetrag|betrag|zahlbetrag|brutto)/i;
+const TOTAL_WORDS = /(zu\s*zahlen|summe|gesamt|total|endbetrag|betrag|zahlbetrag|brutto|karte|girocard|ec[\s-]?cash|kartenzahlung|visa|mastercard|maestro|\bbar\b)/i;
 const STRONG_TOTAL = /(zu\s*zahlen|summe|gesamt|endbetrag|zahlbetrag)/i;
 const NOT_TOTAL = /(zwischensumme|mwst|ust|steuer|netto|rückgeld|rueckgeld|zurück|gegeben|rabatt|pfand)/i;
 
@@ -37,6 +37,8 @@ function toCents(intPart, dec) {
 
 function amountsIn(line) {
   const out = [];
+  // Datum (17.11.2026) und Uhrzeit sind keine Beträge
+  line = line.replace(/(?<!\d)\d{1,2}\s?\.\s?\d{1,2}\s?\.\s?(?:\d{4}|\d{2})(?!\d)/g, ' ').replace(/\d{1,2}:\d{2}(?::\d{2})?/g, ' ');
   for (const m of line.matchAll(AMOUNT_RE)) out.push(toCents(m[1], m[2]));
   return out;
 }
