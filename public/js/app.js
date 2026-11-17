@@ -9,6 +9,7 @@ import { esc, euro, euroShort, parseEuroInput, centsToInput, monthKey, monthLabe
 import { sync } from './sync.js';
 import { createWeg } from './weg.js';
 import * as Q from './qty.js';
+import { celebrate, initRewardAudio } from './reward.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const CAT = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
@@ -105,7 +106,7 @@ function dueFlag(due) {
 const dueText = (t) => (t.due ? dueFlag(t.due) : t.note ? t.note.split('\n')[0] : '');
 const todoCard = (t) => `<div class="row">${CK}<div><div class="t">${esc(t.title)}</div>${dueText(t) ? `<div class="s${t.due && t.due < today() ? ' over' : ''}">${t.due ? '⚑ ' : ''}${esc(dueText(t))}</div>` : ''}</div></div>`;
 function todoItems() {
-  const items = openTodos().map((t) => ({ key: t.id, v: t.pos ? t.pos.v : 0, free: true, pos: t.pos || null, html: todoCard(t), cls: pendingDone.has(t.id) ? 'done' : '' }));
+  const items = openTodos().map((t) => ({ key: t.id, v: t.pos ? t.pos.v : 0, free: true, pos: t.pos || null, html: todoCard(t), cls: pendingDone.has(t.id) ? 'done fly' : '' }));
   return { items, empty: { 0: 'Alles erledigt. Tipp auf eine freie Stelle für eine neue Aufgabe.' } };
 }
 
@@ -312,6 +313,8 @@ function onMore(si, v) {
 }
 
 async function completeTodo(t) {
+  const el = weg.cardEl(TODO, t.id);
+  const wait = celebrate(el);
   pendingDone.add(t.id); refresh(TODO);
   setTimeout(async () => {
     pendingDone.delete(t.id);
@@ -319,7 +322,7 @@ async function completeTodo(t) {
     await db.put('todos', { ...cur, done: true, doneAt: Date.now() });
     await changed(TODO);
     toast('Erledigt', { action: 'Rückgängig', onAction: async () => { const c = await db.get('todos', t.id); if (c) { await db.put('todos', { ...c, done: false, doneAt: null }); await changed(TODO); } } });
-  }, 420);
+  }, wait || 420);
 }
 async function buyShop(x) {
   pendingDone.add(x.id); refresh(SHOP);
@@ -960,6 +963,7 @@ document.addEventListener('visibilitychange', () => {
 // ---------- Start ----------
 async function start() {
   requestPersistence();
+  initRewardAudio();
   await load();
   const startSt = Math.max(0, Math.min(SECT.length - 1, Number(ls.get('lifestyle.station')) || 0));
   try {
