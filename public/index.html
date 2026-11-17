@@ -15,6 +15,18 @@
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
   <link rel="stylesheet" href="css/app.css">
+  <script>
+    // Großer Bildschirm mit Maus: statt der App kommt die Landingpage (public/landing/).
+    // ?app öffnet trotzdem die App, ?landing zeigt die Landingpage überall.
+    (function () {
+      var q = location.search, mm = function (m) { return window.matchMedia && matchMedia(m).matches; };
+      var standalone = navigator.standalone || mm('(display-mode: standalone)');
+      var phone = /iPhone|iPod|iPad|Android/.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
+      var big = Math.min(screen.width, screen.height) >= 700 && innerWidth >= 820;
+      window.BUMMEL_DESK = /[?&]landing\b/.test(q) || (!/[?&]app\b/.test(q) && !standalone && !phone && big && mm('(hover: hover) and (pointer: fine)'));
+      if (window.BUMMEL_DESK) document.documentElement.className += ' desk';
+    })();
+  </script>
 </head>
 <body>
   <div class="boot" id="boot">Bummel</div>
@@ -32,6 +44,6 @@
   <input type="file" id="import-file" accept="application/json,.json" hidden>
 
   <script src="vendor/three/three.min.js"></script>
-  <script type="module" src="js/app.js"></script>
+  <script type="module">import(window.BUMMEL_DESK ? './landing/landing.js' : './js/app.js');</script>
 </body>
 </html>
