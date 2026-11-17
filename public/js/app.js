@@ -69,6 +69,8 @@ function toast(msg, o = {}) {
 // ---------- Daten laden und Karten setzen ----------
 async function load() {
   for (const k of Object.keys(data)) data[k] = await db.all(k);
+  // Drogerie gibt es nicht mehr als Kategorie: alte Belege einmalig zu Haushalt umhängen
+  for (const r of data.receipts) if (r.category === 'drogerie') { r.category = 'haushalt'; await db.put('receipts', r); }
 }
 async function changed(sections, fly) {
   markDirty();
@@ -136,32 +138,61 @@ function monthData(key) {
   const rs = data.receipts.filter((r) => r.date && r.date.startsWith(key));
   return { rs, total: rs.reduce((s, r) => s + (r.total || 0), 0) };
 }
+// Vergleich mit dem Vormonat: im laufenden Monat nur bis zum gleichen Tag, sonst wirkt er immer billiger.
+function cutDay(m) { return m === monthKey(new Date()) ? new Date().getDate() : 31; }
+function prevUpTo(m) { const pm = shiftMonth(m, -1), d = cutDay(m); return monthData(pm).rs.filter((r) => +r.date.slice(8, 10) <= d); }
+const pct = (a, b) => Math.round((a - b) / b * 100);
+const sumOf = (rs) => rs.reduce((s, r) => s + (r.total || 0), 0);
+const WD = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+function weekdayAvg(y) {
+  const now = new Date(), end = String(now.getFullYear()) === y ? now : new Date(+y, 11, 31);
+  const cnt = [0, 0, 0, 0, 0, 0, 0], sum = [0, 0, 0, 0, 0, 0, 0];
+  for (let d = new Date(+y, 0, 1); d <= end; d.setDate(d.getDate() + 1)) cnt[(d.getDay() + 6) % 7]++;
+  for (const r of data.receipts) if (r.date && r.date.startsWith(y)) { const d = new Date(r.date + 'T12:00:00'); sum[(d.getDay() + 6) % 7] += r.total || 0; }
+  return sum.map((x, i) => (cnt[i] ? x / cnt[i] : 0));
+}
 function moneyItems() {
   const m = state.month, cur = monthData(m), prev = monthData(shiftMonth(m, -1));
-  const mName = monthLabel(m).split(' ')[0];
+  const mName = monthLabel(m).split(' ')[0], pName = monthLabel(shiftMonth(m, -1)).split(' ')[0];
+  const isNow = m === monthKey(new Date()), pRs = prevUpTo(m), pSum = sumOf(pRs);
   const items = [];
   // Links: Kategorien mit Monatssumme
   const cats = CATEGORIES.map((c) => { const rs = cur.rs.filter((r) => (r.category || 'sonstiges') === c.id); return { ...c, rs, sum: rs.reduce((s, r) => s + r.total, 0) }; })
     .filter((c) => c.sum > 0).sort((a, b) => b.sum - a.sum);
   const top = cats[0] ? cats[0].sum : 1;
-  for (const c of cats) items.push({ key: 'cat:' + c.id, v: -1, html: `<div class="row"><span class="em">${c.icon}</span><div><div class="t">${esc(c.name)}</div><div class="s">${esc(euro(c.sum))} · ${c.rs.length} ${c.rs.length === 1 ? 'Beleg' : 'Belege'}</div></div></div><div class="bar"><i style="width:${Math.max(4, Math.round(c.sum / top * 100))}%"></i></div>` });
-  // Mitte: der Monat
+  for (const c of cats) {
+    const ps = sumOf(pRs.filter((r) => (r.category || 'sonstiges') === c.id)), d = ps >= 2000 ? pct(c.sum, ps) : null;
+    const tag = d === null ? '' : ` <span class="dl ${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : '−'}${Math.abs(d)} %</span>`;
+    items.push({ key: 'cat:' + c.id, v: -1, cls: 'm', html: `<div class="row"><span class="em">${c.icon}</span><div><div class="t">${esc(c.name)}</div><div class="s">${esc(euro(c.sum))}${tag}</div></div></div><div class="bar"><i style="width:${Math.max(4, Math.round(c.sum / top * 100))}%"></i></div>` });
+  }
+  // Mitte: der Monat, mit Vergleich zum Vormonat bis zum gleichen Tag
   let delta = `${cur.rs.length} ${cur.rs.length === 1 ? 'Beleg' : 'Belege'}`;
-  if (prev.total > 0 && cur.total > 0) { const p = Math.round((cur.total - prev.total) / prev.total * 100); delta = `${Math.abs(p)} % ${p > 0 ? 'mehr' : 'weniger'} als ${monthLabel(shiftMonth(m, -1)).split(' ')[0]}`; }
-  items.push({ key: 'total', v: 0, html: `<div class="k">Ausgegeben im ${esc(mName)}</div><div class="big">${esc(euro(cur.total))}</div><div class="s">${esc(delta)}</div>` });
-  const last = [...cur.rs].sort((a, b) => (a.date === b.date ? (b.createdAt || 0) - (a.createdAt || 0) : a.date < b.date ? 1 : -1)).slice(0, 3);
-  if (last.length) items.push({ key: 'last', v: 0, html: `<div class="k">Zuletzt</div>${last.map((r) => `<div class="s" style="margin-top:6px;color:var(--ink)">${esc(r.merchant || CAT[r.category]?.name || 'Ausgabe')} · <b>${esc(euro(r.total))}</b></div>`).join('')}` });
+  if (pSum > 0 && cur.total > 0) { const p = pct(cur.total, pSum); delta = `<span class="dl ${p > 0 ? 'up' : 'down'}">${p > 0 ? '▲' : '▼'} ${Math.abs(p)} %</span> zu ${esc(pName)}${isNow ? ` bis ${new Date().getDate()}.` : ''}`; }
+  items.push({ key: 'total', v: 0, cls: 'm', html: `<div class="k">Ausgegeben im ${esc(mName)}</div><div class="big">${esc(euro(cur.total))}</div><div class="s">${delta}</div>` });
+  if (cur.total > 0) {
+    const days = isNow ? new Date().getDate() : new Date(+m.slice(0, 4), +m.slice(5, 7), 0).getDate();
+    const byDay = new Map(); for (const r of cur.rs) byDay.set(r.date, (byDay.get(r.date) || 0) + (r.total || 0));
+    const [dTop, dSum] = [...byDay].sort((a, b) => b[1] - a[1])[0];
+    const dLbl = new Date(dTop + 'T12:00:00').toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'numeric' });
+    items.push({ key: 'day:' + dTop, v: 0, cls: 'm', html: `<div class="k">Pro Tag im Schnitt</div><div class="mid">${esc(euro(cur.total / days))}</div><div class="s">Teuerster Tag</div><div class="s" style="margin-top:1px;color:var(--ink)">${esc(dLbl)} · <b>${esc(euro(dSum))}</b></div>` });
+    const big = [...cur.rs].sort((a, b) => (b.total || 0) - (a.total || 0)).slice(0, 3);
+    items.push({ key: 'top', v: 0, cls: 'm', html: `<div class="k">Größte Ausgaben</div>${big.map((r) => `<div class="tr" data-rid="${esc(r.id)}"><span>${esc(r.merchant || CAT[r.category]?.name || 'Ausgabe')}</span><b>${esc(euro(r.total))}</b></div>`).join('')}` });
+  }
   if (data.receipts.length) items.push({ key: 'search', v: 0, html: `<div class="t">🔍 Belege durchsuchen</div><div class="s">${data.receipts.length} insgesamt</div>` });
   // Rechts: das Jahr
   const y = m.slice(0, 4), months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
   const sums = months.map((k) => monthData(k).total), ytotal = sums.reduce((a, b) => a + b, 0);
   const used = sums.filter((x) => x > 0).length || 1, mx = Math.max(1, ...sums);
-  items.push({ key: 'year', v: 1, html: `<div class="k">${y} bisher</div><div class="big">${esc(euroShort(ytotal))}</div><div class="s">Ø ${esc(euroShort(ytotal / used))} im Monat · Monat antippen</div>
+  items.push({ key: 'year', v: 1, cls: 'm', html: `<div class="k">${y} bisher</div><div class="big">${esc(euroShort(ytotal))}</div><div class="s">Ø ${esc(euroShort(ytotal / used))} im Monat · Monat antippen</div>
     <div class="yr">${sums.map((x, i) => `<i class="${months[i] === m ? 'sel' : ''}" style="height:${Math.max(4, Math.round(x / mx * 100))}%"></i>`).join('')}</div>
     <div class="yrl">${'JFMAMJJASOND'.split('').map((c) => `<span>${c}</span>`).join('')}</div>` });
   if (ytotal > 0) {
+    const wd = weekdayAvg(y), wmx = Math.max(1, ...wd), wi = wd.indexOf(Math.max(...wd));
+    items.push({ key: 'wd', v: 1, cls: 'm', html: `<div class="k">Nach Wochentag</div><div class="s">Ø pro Tag übers Jahr</div>
+      <div class="yr wd">${wd.map((x, i) => `<i class="${i === wi ? 'sel' : ''}" style="height:${Math.max(4, Math.round(x / wmx * 100))}%"></i>`).join('')}</div>
+      <div class="yrl">${WD.map((c) => `<span>${c}</span>`).join('')}</div>` });
     const iMax = sums.indexOf(Math.max(...sums));
-    items.push({ key: 'ymax', v: 1, html: `<div class="k">Teuerster Monat</div><div class="t" style="margin-top:6px">${esc(monthLabel(months[iMax]).split(' ')[0])}</div><div class="s">${esc(euro(sums[iMax]))}</div>` });
+    items.push({ key: 'ymax', v: 1, cls: 'm', html: `<div class="k">Teuerster Monat</div><div class="t" style="margin-top:6px">${esc(monthLabel(months[iMax]).split(' ')[0])}</div><div class="s">${esc(euro(sums[iMax]))}</div>` });
   }
   return { items, empty: { '-1': `Im ${mName} noch keine Ausgaben.` } };
 }
@@ -243,6 +274,13 @@ async function onCardTap(h) {
       refresh(MONEY); toast(`${monthLabel(state.month)} gewählt`, { action: 'Zeigen', onAction: () => weg.setView(0) });
       return;
     }
+    if (key.startsWith('day:')) return daySheet(key.slice(4));
+    if (key === 'top') {
+      const row = [...h.el.querySelectorAll('[data-rid]')].find((e) => { const r = e.getBoundingClientRect(); return h.y >= r.top - 4 && h.y <= r.bottom + 4; });
+      const rec = row && data.receipts.find((r) => r.id === row.dataset.rid);
+      return rec ? editReceipt(rec) : receiptsSheet();
+    }
+    if (key === 'wd') return;
     if (key === 'search' || key === 'last' || key === 'total') return receiptsSheet();
     if (key === 'ymax') return;
   }
@@ -362,11 +400,20 @@ function whenDue(w) {
   if (w === 'Nächste Woche') { const wd = d.getDay(); d.setDate(d.getDate() + (((8 - wd) % 7) || 7)); return toISODate(d); }
   return null;
 }
+// Datumsfeld: sieht aus wie ein Knopf mit Kalender, darüber liegt unsichtbar das echte Datumsfeld (öffnet den iOS-Picker).
+const CAL = '<svg class="dico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+function dateLabel(iso) {
+  if (!iso) return 'Datum wählen';
+  const d = new Date(iso + 'T12:00:00');
+  return `${d.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'long' })} · ${dueFlag(iso)}`;
+}
+const dateField = (id, wrapId, val) => `<div class="datef${val ? ' set' : ''}" id="${wrapId}">${CAL}<span class="dtxt">${esc(dateLabel(val))}</span><input id="${id}" type="date" value="${esc(val || '')}" aria-label="Deadline wählen"><button type="button" class="clr" data-act="clr" aria-label="Deadline entfernen">×</button></div>`;
+function syncDateField(wrap) { const i = wrap.querySelector('input'); wrap.classList.toggle('set', !!i.value); wrap.querySelector('.dtxt').textContent = dateLabel(i.value); }
 function todoSheet(t) {
   let due = t.due || null;
   openSheet(`${sheetHead('')}<div class="sbody">
       <textarea class="ttl" id="t-title" rows="2">${esc(t.title)}</textarea>
-      <div class="field"><span>Deadline</span><div class="datef${due ? ' set' : ''}" id="t-df"><input id="t-due" type="date" value="${esc(due || '')}"><button type="button" class="clr" id="t-clr" aria-label="Deadline entfernen">×</button></div></div>
+      <div class="field"><span>Deadline</span>${dateField('t-due', 't-df', due)}</div>
       <label class="field"><span>Notiz</span><textarea id="t-note" rows="3" placeholder="Optional">${esc(t.note || '')}</textarea></label>
       <div class="btn-row"><button class="btn primary" data-act="done">Erledigt</button><button class="btn danger" data-act="delete">Löschen</button></div>
     </div>`, async () => {
@@ -378,8 +425,8 @@ function todoSheet(t) {
     }
   });
   bindClose();
-  const setDue = (d) => { due = d; $('#t-due').value = due || ''; $('#t-df').classList.toggle('set', !!due); };
-  $('#t-clr').addEventListener('click', () => setDue(null));
+  const setDue = (d) => { due = d; $('#t-due').value = due || ''; syncDateField($('#t-df')); };
+  $('#t-df .clr').addEventListener('click', () => setDue(null));
   $('#t-due').addEventListener('change', (e) => setDue(e.target.value || null));
   sheet.querySelector('[data-act="done"]').onclick = async () => { await closeSheet(); completeTodo(t); };
   sheet.querySelector('[data-act="delete"]').onclick = async () => {
@@ -494,6 +541,12 @@ function categorySheet(cat) {
   const groups = new Map(); for (const r of rs) { const k = weekLabel(r.date); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
   openSheet(`${sheetHead(`${c.icon} ${c.name}`)}<div class="sbody"><p class="muted" style="margin:0 0 4px">${esc(monthLabel(state.month))} · ${esc(euro(rs.reduce((s, r) => s + r.total, 0)))}</p>
     ${[...groups].map(([k, list]) => `<div class="gh"><span>${esc(k)}</span><span>${esc(euro(list.reduce((s, r) => s + r.total, 0)))}</span></div><div class="list">${list.map(receiptRow).join('')}</div>`).join('')}</div>`);
+  bindClose(); bindReceiptRows(sheet);
+}
+function daySheet(iso) {
+  const rs = data.receipts.filter((r) => r.date === iso).sort((a, b) => (b.total || 0) - (a.total || 0));
+  const lbl = new Date(iso + 'T12:00:00').toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
+  openSheet(`${sheetHead(lbl)}<div class="sbody"><p class="muted" style="margin:0 0 4px">${rs.length} ${rs.length === 1 ? 'Beleg' : 'Belege'} · ${esc(euro(sumOf(rs)))}</p><div class="list">${rs.map(receiptRow).join('')}</div></div>`);
   bindClose(); bindReceiptRows(sheet);
 }
 function receiptsSheet() {
@@ -628,7 +681,7 @@ function cmpHtml(type, v) {
   const x = '<button type="button" class="x" data-act="x">Abbrechen</button>';
   if (type === 'todo') {
     return `<div class="kk"><span>Neue Aufgabe</span>${x}</div><div class="fld"><span class="ck"></span><input id="fT" placeholder="Was steht an?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></div>
-      <div class="lab">Deadline, wenn es eine gibt</div><div class="datef" id="fDf"><input id="fW" type="date"><button type="button" class="clr" data-act="clr" aria-label="Deadline entfernen">×</button></div>
+      <div class="lab">Deadline, wenn es eine gibt</div>${dateField('fW', 'fDf', '')}
       <div class="foot"><span class="dest" id="fD"></span><button type="button" class="go" id="fGo" disabled>Hinzufügen</button></div>`;
   }
   if (type === 'shop') {
@@ -664,7 +717,7 @@ function cmpRefresh() {
   if (cmpCtx.type === 'todo') {
     const wi = q('#fW');
     if (!manual.when) { const hit = WHEN.find((w) => w[1].test(t)); const nv = hit ? whenDue(hit[0]) : ''; if (wi.value !== nv) { wi.value = nv; if (nv) { const f = q('#fDf'); f.classList.remove('pulse'); void f.offsetWidth; f.classList.add('pulse'); } } }
-    q('#fDf').classList.toggle('set', !!wi.value);
+    syncDateField(q('#fDf'));
     q('#fD').textContent = wi.value ? `Mit Fahne „${dueFlag(wi.value)}“` : 'Bekommt einen freien Platz'; go.disabled = !t.trim();
   }
   if (cmpCtx.type === 'shop') {

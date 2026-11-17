@@ -183,14 +183,29 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: rgba(29,35
   .cmp, .sheet { transition: opacity .2s; }
 }
 
-/* Deadline: Datumsfeld mit Löschen-Knopf */
-.datef { position: relative; display: flex; align-items: center; border-radius: 14px; background: rgba(29,35,32,.05); min-height: 46px; transition: box-shadow .2s, background .2s; }
-.datef input[type=date] { flex: 1; width: 100%; min-width: 0; border: 0; background: none; outline: none; -webkit-appearance: none; appearance: none; min-height: 46px; padding: 0 44px 0 14px; font: 500 16px/46px var(--sans); color: var(--ink); text-align: left; box-shadow: none !important; }
-.datef input[type=date]::-webkit-date-and-time-value { text-align: left; }
-.datef:not(.set) input[type=date] { color: var(--ink3); }
-.datef .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; border-radius: 50%; border: 0; background: rgba(29,35,32,.08); color: var(--ink2); font: 500 18px/1 var(--sans); display: none; }
+/* Deadline: Knopf mit Kalender, das echte Datumsfeld liegt unsichtbar darüber */
+.datef { position: relative; display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 46px 0 14px; border-radius: 14px; background: #fff; border: 1.5px dashed rgba(29,35,32,.22); color: var(--ink2); transition: background .2s, border-color .2s, box-shadow .2s; }
+.datef .dico { width: 20px; height: 20px; flex: none; color: var(--acc); }
+.datef .dtxt { flex: 1; min-width: 0; font: 550 15.5px/1.2 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.datef input[type=date] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; margin: 0; padding: 0; z-index: 1; -webkit-appearance: none; appearance: none; cursor: pointer; font-size: 16px; }
+.datef .clr { position: absolute; z-index: 2; right: 8px; top: 50%; transform: translateY(-50%); width: 30px; height: 30px; border-radius: 50%; border: 0; background: rgba(29,35,32,.08); color: var(--ink2); font: 500 18px/1 var(--sans); display: none; }
+.datef.set { border-style: solid; border-color: color-mix(in srgb, var(--acc) 45%, transparent); background: color-mix(in srgb, var(--acc) 10%, #fff); color: var(--ink); }
 .datef.set .clr { display: block; }
-.datef.set { background: color-mix(in srgb, var(--acc) 12%, transparent); }
+.datef:active { box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 22%, transparent); }
 .datef.pulse { animation: dpulse .5s; }
 @keyframes dpulse { 40% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--acc) 30%, transparent); } }
 .cmp .datef { margin-bottom: 2px; }
+
+/* Finanzen: Kennzahlen */
+.wc .dl { font: 650 11px/1 var(--sans); margin-left: 6px; padding: 2px 6px; border-radius: 8px; white-space: nowrap; vertical-align: 1px; }
+.wc .s .dl { margin-left: 0; margin-right: 2px; }
+.wc .dl.up { color: #b4541d; background: rgba(214,110,40,.12); }
+.wc .dl.down { color: #2f7a43; background: rgba(63,122,74,.12); }
+.wc .mid { font: 500 24px/1.1 var(--serif); letter-spacing: -.01em; margin: 5px 0 3px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wc .tr { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font: 500 13.5px/1.25 var(--sans); }
+.wc .tr span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc .tr b { font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wc .yr.wd { height: 38px; gap: 6px; }
+.wc .yr.wd + .yrl { gap: 6px; }
+.wc.m .s { white-space: normal; overflow: visible; }
+.wc.m .row .s .dl { margin-left: 4px; }
