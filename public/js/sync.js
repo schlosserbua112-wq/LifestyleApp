@@ -9,7 +9,7 @@ const setRev = (r) => { try { localStorage.setItem(REV_KEY, String(r)); } catch 
 
 // Verlauf zweier Stände einer Idee zusammenführen (nichts geht verloren).
 // 401: Schlüssel passt nicht; der Server sagt, wie viele Zeichen er erwartet
-async function keyError(res) { try { const j = await res.json(); return 'Server-Schlüssel passt nicht.' + (j.hint ? ' ' + j.hint : ''); } catch { return 'Server-Schlüssel passt nicht.'; } }
+async function keyError(res) { let j = null; try { j = await res.json(); } catch { /* keine Antwort von Bummel */ } if (j && j.hint) return 'Server-Schlüssel passt nicht. ' + j.hint; return 'Zugriff abgelehnt (401), aber nicht vom Bummel-Server. Prüf die Server-Adresse unter Mehr oder einen Passwortschutz in Coolify.'; }
 
 export function mergeLog(a = [], b = []) {
   const seen = new Map();
