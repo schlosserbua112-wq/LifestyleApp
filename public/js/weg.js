@@ -507,7 +507,7 @@ function setItems(si, list, o = {}) {
       it.v = it.free && it.pos ? it.v : x.v; it.fadeTo = 1;
     }
     it.free = !!x.free; it.allowed = x.views || null;
-    if (x.free) { if (x.pos && (!it.pos || it.pos.v !== x.pos.v || it.pos.x !== x.pos.x || it.pos.y !== x.pos.y) && !(drag && drag.it === it)) it.pos = { ...x.pos }; else if (!x.pos && !it.placed) it.pos = null; }
+    if (x.free) { if (x.pos && (!it.pos || it.pos.v !== x.pos.v || it.pos.x !== x.pos.x || it.pos.y !== x.pos.y) && !(drag && drag.it === it)) it.pos = { ...x.pos }; else if (!x.pos && (!it.placed || o.reset)) { it.pos = null; it.placed = false; } }
     if (!x.free) (ord[x.v] || ord[0]).push(x.key);
   }
   for (const [k, it] of ITEMS[si]) if (!seen.has(k) && !k.startsWith('__')) { if (drag && drag.it === it) endDrag(true); dropItem(it); }
@@ -610,12 +610,37 @@ function solve(nodes, reg, iters = 60) {
 function findSpot(it, nodes, reg) {
   const R = rnd(Math.abs(hash(it.key)) + 11);
   const b = span(reg, it.w, it.h);
-  let best = null;
   for (let t = 0; t < 80; t++) {
     const c = { x: b.x0 + R() * Math.max(0, b.x1 - b.x0), y: b.y0 + R() * Math.max(0, b.y1 - b.y0), w: it.w, h: it.h };
     if (!nodes.some((n) => hit2(n, c))) return c;
   }
-  return best;
+  // Zufall findet nichts mehr: Fläche von oben nach unten absuchen (kleine Karten passen oft noch in Lücken).
+  for (let y = b.y0; y <= b.y1; y += 6) for (let x = b.x0; x <= b.x1; x += 8) {
+    const c = { x, y, w: it.w, h: it.h };
+    if (!nodes.some((n) => hit2(n, c))) return c;
+  }
+  return null;
+}
+// Karten in Reihen legen, die Reihen gleichmäßig über die Fläche verteilt, jede Reihe leicht versetzt.
+function flowFill(list, reg) {
+  const AW = reg.right - reg.left, rows = []; let row = [], w = 0;
+  for (const it of list) {
+    if (row.length && w + GAP + it.w > AW) { rows.push(row); row = []; w = 0; }
+    w = row.length ? w + GAP + it.w : it.w; row.push(it);
+  }
+  if (row.length) rows.push(row);
+  const fit = []; let total = 0; const maxH = reg.bottom - reg.top - MORE_H;
+  for (const r of rows) { const h = Math.max(...r.map((it) => it.h)); if (total + h > maxH) break; fit.push({ r, h }); total += h + GAP; }
+  const step = Math.min(Math.max(0, maxH - total) / (fit.length + 1), 34);
+  const out = []; let y = reg.top + step;
+  fit.forEach(({ r, h }, i) => {
+    const R = rnd(Math.abs(hash(r[0].key)) + 5);
+    const rw = r.reduce((s2, it) => s2 + it.w, 0) + GAP * (r.length - 1), slack = AW - rw;
+    let x = reg.left + (r.length === 1 ? slack * (i % 2 ? 0.6 + R() * 0.4 : R() * 0.4) : slack / 2 + (R() - 0.5) * Math.min(slack, 36));
+    for (const it of r) { out.push({ it, x: x + it.w / 2, y: y + h / 2 + (R() - 0.5) * 6 }); x += it.w + GAP; }
+    y += h + GAP + step;
+  });
+  return out;
 }
 function placeFree(si, reg) {
   const cap = SECT[si].cap || 6, free = FREE[si];
@@ -624,6 +649,19 @@ function placeFree(si, reg) {
     if (!it.free || it.gone) continue;
     if (it.pos && free.includes(it.pos.v) && (!it.allowed || it.allowed.includes(it.pos.v))) { it.v = it.pos.v; by[it.v].push(it); it.hidden = false; }
     else wait.push(it);
+  }
+  // Viele Karten ohne Platz (z. B. wenn der Einkauf seine Kartengröße wechselt): eine leere Seite in lockeren Reihen
+  // füllen statt jede Karte einzeln zufällig zu setzen, sonst bleiben große Lücken und es passt nur die Hälfte drauf.
+  if (wait.length >= 3) {
+    for (const v of [0, 1, -1]) {
+      if (!free.includes(v) || by[v].length) continue;
+      const fit = wait.filter((it) => !it.allowed || it.allowed.includes(v));
+      for (const { it, x, y } of flowFill(fit.slice(0, cap), reg)) {
+        it.v = v; it.pos = { v, ...normOf(x, y, it, reg) }; it.placed = true; it.hidden = false; it.overflow = null;
+        by[v].push(it); fresh.push({ key: it.key, pos: it.pos }); wait.splice(wait.indexOf(it), 1);
+      }
+      if (wait.length < 3) break;
+    }
   }
   for (const it of wait) {
     const prefs = (it.allowed || [0, 1, -1]).filter((v) => free.includes(v));
@@ -835,6 +873,7 @@ function reorder() {
 function endDrag(silent) {
   const d = drag; if (!d) return; drag = null; lock = null;
   const it = d.it;
+  if (!silent && !d.moved && opt.onHold) setTimeout(() => opt.onHold({ si: d.si, v: d.v, key: it.key, el: it.el }), 0);
   const an = anchorOf(d.px, d.py, d.v);
   it.a = an.a; it.y = an.y; it.r = an.r; it.va = it.vy = it.vr = 0;
   it.dropSc = d.sc; it.dropT = d.tilt;
