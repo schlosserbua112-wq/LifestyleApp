@@ -756,7 +756,9 @@ function release() {
   }
   if (lock !== 'y' && !moved) { tap(tx, ty, tapped); return; }
   lock = null;
-  const f = (target - S0) / SPACING + vel * 0.9; target = stationS(Math.round(f));
+  const base = Math.round((ts - S0) / SPACING), d = (target - S0) / SPACING - base + Math.max(-1.1, Math.min(1.1, vel * 0.55));
+  // Ein Bereich weiter reicht schon ein kurzer Wisch, zum Überspringen braucht es einen langen, kräftigen Zug.
+  const a = Math.abs(d), n = a < 0.22 ? 0 : a < 1.75 ? 1 : Math.round(a - 0.75); target = stationS(base + Math.sign(d) * n);
 }
 addEventListener('pointerup', release); addEventListener('pointercancel', () => { if (drag) endDrag(); down = false; cancelPress(); lock = null; yawDrag = false; });
 

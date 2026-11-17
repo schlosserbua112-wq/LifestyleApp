@@ -1,4 +1,4 @@
-// Kleiner Server für die Lifestyle-App: liefert die App aus und nimmt Backups an.
+// Kleiner Server für die App Bummel: liefert die App aus und nimmt Backups an.
 // Keine Abhängigkeiten, nur Node.js. Daten liegen in DATA_DIR (in Coolify als Volume einhängen).
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
@@ -148,5 +148,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Lifestyle läuft auf Port ${PORT}${TOKEN ? '' : ' (ohne BACKUP_TOKEN: Backup und Abgleich aus)'}${MCP_TOKEN ? '' : ' (ohne MCP_TOKEN: Claude-Connector aus)'}`);
+  console.log(`Bummel läuft auf Port ${PORT}${TOKEN ? '' : ' (ohne BACKUP_TOKEN: Backup und Abgleich aus)'}${MCP_TOKEN ? '' : ' (ohne MCP_TOKEN: Claude-Connector aus)'}`);
 });

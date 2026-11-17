@@ -1,4 +1,4 @@
-# Lifestyle
+# Bummel
 
 Persönliche Web-App fürs iPhone: To-Dos, Projektideen und Ausgaben mit Belegscanner.
 Läuft komplett offline, alle Daten liegen auf dem iPhone (IndexedDB).

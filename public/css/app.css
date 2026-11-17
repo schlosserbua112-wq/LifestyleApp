@@ -1,4 +1,4 @@
-/* Lifestyle: ein Weg durch die Stadt. Karten schweben neben dem Weg, alles andere kommt als Blatt von unten. */
+/* Bummel: ein Weg durch die Stadt. Karten schweben neben dem Weg, alles andere kommt als Blatt von unten. */
 :root {
   color-scheme: light;
   --ink: #1d2320; --ink2: rgba(29,35,32,.62); --ink3: rgba(29,35,32,.38);
@@ -181,3 +181,20 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: rgba(29,35
 @media (prefers-reduced-motion: reduce) {
   .cmp, .sheet { transition: opacity .2s; }
 }
+
+/* Deadline: Datumsfeld mit Löschen-Knopf */
+.datef { position: relative; display: flex; align-items: center; border-radius: 14px; background: rgba(29,35,32,.05); min-height: 46px; transition: box-shadow .2s, background .2s; }
+.datef input[type=date] { flex: 1; width: 100%; min-width: 0; border: 0; background: none; outline: none; -webkit-appearance: none; appearance: none; min-height: 46px; padding: 0 44px 0 14px; font: 500 16px/46px var(--sans); color: var(--ink); text-align: left; box-shadow: none !important; }
+.datef input[type=date]::-webkit-date-and-time-value { text-align: left; }
+.datef:not(.set) input[type=date] { color: var(--ink3); }
+.datef .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; border-radius: 50%; border: 0; background: rgba(29,35,32,.08); color: var(--ink2); font: 500 18px/1 var(--sans); display: none; }
+.datef.set .clr { display: block; }
+.datef.set { background: color-mix(in srgb, var(--acc) 12%, transparent); }
+.datef.pulse { animation: dpulse .5s; }
+@keyframes dpulse { 40% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--acc) 30%, transparent); } }
+.cmp .datef { margin-bottom: 2px; }
+
+/* Belegscanner-Karte in Finanzen */
+.wc.scan { background: var(--acc); color: #fff; }
+.wc.scan .t { color: #fff; }
+.wc.scan .s { color: rgba(255,255,255,.82); }
