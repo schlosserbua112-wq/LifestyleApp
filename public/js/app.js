@@ -21,14 +21,14 @@ const ls = {
 const TODO = 0, SHOP = 1, MONEY = 2, PROJ = 3, MORE = 4;
 const SECT = [
   { id: 'todos', title: 'Aufgaben', views: [0], free: [-1, 0, 1], cap: 6 },
-  { id: 'shop', title: 'Einkauf', views: [-1, 0] },
+  { id: 'shop', title: 'Einkauf', views: [-1, 0], free: [0, 1], cap: 6 },
   { id: 'money', title: 'Finanzen', views: [-1, 0, 1], drag: false },
   { id: 'proj', title: 'Projekte', views: [-1, 0], free: [-1, 0, 1], cap: 6 },
   { id: 'more', title: 'Mehr', views: [0], drag: false },
 ];
 const VNAME = [
   { '-1': 'Links', 0: 'Mitte', 1: 'Rechts' },
-  { '-1': 'Oft gekauft', 0: 'Liste' },
+  { '-1': 'Oft gekauft', 0: 'Liste', 1: 'Liste' },
   { '-1': 'Kategorien', 0: '', 1: '' },
   { '-1': 'Gedankenblitze', 0: 'Projekte', 1: 'Ältere Projekte' },
   { 0: 'Am Ende des Wegs' },
@@ -124,8 +124,9 @@ function frequent() {
 }
 const shopCard = (x) => `<div class="row">${CK}<div><div class="t">${esc(x.emoji || emoOf(x.title))} ${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([x.qty, x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
 function shopItems() {
-  const items = ordered(onList(), (a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-    .map((x) => ({ key: x.id, v: 0, html: shopCard(x), cls: pendingDone.has(x.id) ? 'done' : '' }));
+  // Wie bei Aufgaben: jedes Ding bekommt einen freien Platz (Mitte, dann rechts) und bleibt dort, bis man es verschiebt.
+  const items = onList().slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .map((x) => ({ key: x.id, v: x.pos ? x.pos.v : 0, free: true, pos: x.pos || null, views: [0, 1], html: shopCard(x), cls: pendingDone.has(x.id) ? 'done' : '' }));
   for (const f of frequent()) items.push({ key: 'oft:' + norm(f.title), v: -1, html: `<div class="row"><span class="em">${esc(f.emoji || emoOf(f.title))}</span><div><div class="t">${esc(f.title)}</div><div class="s">${f.n}× gekauft</div><span class="add">+ Auf die Liste</span></div></div>` });
   return { items, empty: { '-1': 'Hier landet, was du oft kaufst.', 0: 'Die Liste ist leer. Tipp auf eine freie Stelle.' } };
 }
@@ -295,17 +296,10 @@ async function addShop({ title, qty = '', emoji, note = '' }, rect, msg) {
   if (msg) toast(msg);
 }
 
-// Halten und Ziehen. Einkauf: neue Reihenfolge merken. Aufgaben und Projekte: Platz (Seite + x/y) merken.
-async function onReorder(si, v, keys) {
-  if (si !== SHOP) return;
-  for (let i = 0; i < keys.length; i++) {
-    const rec = data.shopping.find((x) => x.id === keys[i]);
-    if (rec && rec.order !== i) await db.put('shopping', { ...rec, order: i });
-  }
-  markDirty(); await load(); scheduleSync();
-}
+// Halten und Ziehen: Aufgaben, Einkauf und Projekte merken sich ihren Platz (Seite + x/y).
+async function onReorder() {}
 async function onPlace(si, list) {
-  const store = si === TODO ? 'todos' : si === PROJ ? 'ideas' : null;
+  const store = si === TODO ? 'todos' : si === SHOP ? 'shopping' : si === PROJ ? 'ideas' : null;
   if (!store) return;
   for (const { key, pos } of list) {
     const rec = await db.get(store, key);
