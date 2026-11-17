@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Bummel</title>
+  <meta name="description" content="Aufgaben, Einkauf, Finanzen und Projekte auf einem Weg durch die Stadt, offline auf deinem iPhone.">
+  <meta name="theme-color" content="#f3eee4">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Bummel">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+  <script>
+    // Großer Bildschirm mit Maus: statt der App kommt die Landingpage (public/landing/).
+    // ?app öffnet trotzdem die App, ?landing zeigt die Landingpage überall.
+    (function () {
+      var q = location.search, mm = function (m) { return window.matchMedia && matchMedia(m).matches; };
+      var standalone = navigator.standalone || mm('(display-mode: standalone)');
+      var phone = /iPhone|iPod|iPad|Android/.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
+      var big = Math.min(screen.width, screen.height) >= 700 && innerWidth >= 820;
+      window.BUMMEL_DESK = /[?&]landing\b/.test(q) || (!/[?&]app\b/.test(q) && !standalone && !phone && big && mm('(hover: hover) and (pointer: fine)'));
+      if (window.BUMMEL_DESK) document.documentElement.className += ' desk';
+    })();
+  </script>
+</head>
+<body>
+  <div class="boot" id="boot">Bummel</div>
+  <div class="hud" id="hud"></div>
+
+  <div class="scrim" id="scrim" data-ui></div>
+  <div class="cmp" id="cmp" role="dialog" aria-label="Neuer Eintrag" data-ui></div>
+
+  <div class="veil" id="veil" data-ui></div>
+  <section class="sheet" id="sheet" role="dialog" aria-modal="true" data-ui></section>
+  <div class="toast" id="toast" role="status" aria-live="polite" data-ui></div>
+
+  <input type="file" id="camera" accept="image/*" capture="environment" hidden>
+  <input type="file" id="gallery" accept="image/*" multiple hidden>
+  <input type="file" id="import-file" accept="application/json,.json" hidden>
+
+  <script src="vendor/three/three.min.js"></script>
+  <script type="module">import(window.BUMMEL_DESK ? './landing/landing.js' : './js/app.js');</script>
+</body>
+</html>

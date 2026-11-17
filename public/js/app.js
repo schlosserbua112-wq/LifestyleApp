@@ -1,0 +1,1039 @@
+// Bummel: Aufgaben, Einkauf, Finanzen und Projekte als Stationen auf einem Weg durch die Stadt.
+// Alle Daten liegen auf dem iPhone (IndexedDB). Aufgaben, Einkauf und Projekte werden mit dem eigenen
+// Server abgeglichen, damit Claude über den Connector mitarbeiten kann.
+import { db, uid, requestPersistence, exportAll, importAll } from './db.js';
+import { parseReceipt, CATEGORIES, guessCategory, toISODate } from './parse.js';
+import { prepareImage, recognize } from './ocr.js';
+import { backupSettings, markDirty, uploadBackup, restoreBackup, autoBackup } from './backup.js';
+import { esc, euro, euroShort, parseEuroInput, centsToInput, monthKey, monthLabel, shiftMonth, formatDate, relativeDue } from './util.js';
+import { sync } from './sync.js';
+import { createWeg } from './weg.js';
+import * as Q from './qty.js';
+import { celebrate, initRewardAudio } from './reward.js';
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const CAT = Object.fromEntries(CATEGORIES.map((c) => [c.id, c]));
+const B = document.body;
+const ls = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* egal */ } },
+};
+
+// ---------- Bereiche (Stationen am Weg) ----------
+const TODO = 0, SHOP = 1, MONEY = 2, PROJ = 3, MORE = 4;
+const SECT = [
+  { id: 'todos', title: 'Aufgaben', views: [0], free: [-1, 0, 1], cap: 6 },
+  { id: 'shop', title: 'Einkauf', views: [-1, 0], free: [0, 1], cap: 6 },
+  { id: 'money', title: 'Finanzen', views: [-1, 0, 1], drag: false },
+  { id: 'proj', title: 'Projekte', views: [-1, 0], free: [-1, 0, 1], cap: 6 },
+  { id: 'more', title: 'Mehr', views: [0], drag: false },
+];
+const VNAME = [
+  { '-1': 'Links', 0: 'Mitte', 1: 'Rechts' },
+  { '-1': 'Oft gekauft', 0: 'Liste', 1: 'Liste' },
+  { '-1': 'Kategorien', 0: '', 1: '' },
+  { '-1': 'Gedankenblitze', 0: 'Projekte', 1: 'Ältere Projekte' },
+  { 0: 'Am Ende des Wegs' },
+];
+
+const data = { todos: [], ideas: [], shopping: [], receipts: [] };
+const state = { month: monthKey(new Date()) };
+let weg = null;
+
+// ---------- Kleinkram ----------
+const today = () => toISODate(new Date());
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+const CK = '<span class="ck"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
+const isBlitz = (i) => i.kind === 'blitz';
+const isProject = (i) => !isBlitz(i) && i.status !== 'erledigt' && i.status !== 'verworfen';
+const norm = (t) => String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+// Reihenfolge: von Hand sortierte Karten behalten ihren Platz, neue kommen nach vorne.
+function ordered(list, cmp) {
+  const free = list.filter((x) => typeof x.order !== 'number').sort(cmp);
+  const fixed = list.filter((x) => typeof x.order === 'number').sort((a, b) => a.order - b.order);
+  return [...free, ...fixed];
+}
+
+// ---------- Hinweis unten (mit Rückgängig) ----------
+const toastEl = $('#toast');
+let toastT = null;
+function toast(msg, o = {}) {
+  toastEl.innerHTML = `<span>${esc(msg)}</span>${o.action ? `<button type="button">${esc(o.action)}</button>` : ''}`;
+  toastEl.classList.add('show');
+  const btn = toastEl.querySelector('button');
+  if (btn) btn.addEventListener('pointerup', (e) => { e.stopPropagation(); toastEl.classList.remove('show'); o.onAction && o.onAction(); }, { once: true });
+  toastEl.onpointerup = !btn && o.onTap ? () => { toastEl.classList.remove('show'); o.onTap(); } : null;
+  clearTimeout(toastT);
+  toastT = setTimeout(() => toastEl.classList.remove('show'), o.ms || (o.action ? 5000 : 2600));
+}
+
+// ---------- Daten laden und Karten setzen ----------
+async function load() {
+  for (const k of Object.keys(data)) data[k] = await db.all(k);
+  // Drogerie gibt es nicht mehr als Kategorie: alte Belege einmalig zu Haushalt umhängen
+  for (const r of data.receipts) if (r.category === 'drogerie') { r.category = 'haushalt'; await db.put('receipts', r); }
+}
+async function changed(sections, fly) {
+  markDirty();
+  await load();
+  refresh(sections, fly);
+  scheduleSync();
+}
+function refresh(sections = [TODO, SHOP, MONEY, PROJ, MORE], fly, initial) {
+  if (!weg) return;
+  for (const si of [].concat(sections)) {
+    const r = [todoItems, shopItems, moneyItems, projItems, moreItems][si]();
+    weg.setItems(si, r.items, { empty: r.empty, views: r.views, fly, initial });
+  }
+  weg.refreshHead();
+}
+
+// --- Aufgaben ---
+// Keine Sortierung: jede neue Aufgabe bekommt einen zufälligen freien Platz (erst Mitte, dann rechts, dann links,
+// höchstens 6 je Seite). Der Platz bleibt gespeichert (pos: Seite + x/y) und ändert sich nur durch Halten und Ziehen.
+const addDays = (n) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n); return toISODate(d); };
+const openTodos = () => data.todos.filter((t) => !t.done).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+function dueFlag(due) {
+  if (!due) return '';
+  const td = today();
+  if (due === td) return 'Bis heute';
+  if (due === addDays(1)) return 'Bis morgen';
+  const d = new Date(due + 'T12:00');
+  if (due > td && due <= addDays(6)) return 'Bis ' + d.toLocaleDateString('de-DE', { weekday: 'short' }).replace('.', '');
+  return 'Bis ' + d.toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+}
+const dueText = (t) => (t.due ? dueFlag(t.due) : t.note ? t.note.split('\n')[0] : '');
+const todoCard = (t) => `<div class="row">${CK}<div><div class="t">${esc(t.title)}</div>${dueText(t) ? `<div class="s${t.due && t.due < today() ? ' over' : ''}">${t.due ? '⚑ ' : ''}${esc(dueText(t))}</div>` : ''}</div></div>`;
+function todoItems() {
+  const items = openTodos().map((t) => ({ key: t.id, v: t.pos ? t.pos.v : 0, free: true, pos: t.pos || null, html: todoCard(t), cls: pendingDone.has(t.id) ? 'done fly' : '' }));
+  return { items, empty: { 0: 'Alles erledigt. Tipp auf eine freie Stelle für eine neue Aufgabe.' } };
+}
+
+// --- Einkauf ---
+const EMO = [[/hafermilch|milch/, '🥛'], [/brot|brötchen|toast/, '🍞'], [/käse|feta|mozzarella|parmesan/, '🧀'], [/äpfel|apfel/, '🍎'], [/banane/, '🍌'], [/\beier?\b/, '🥚'], [/tomate/, '🍅'], [/zitrone/, '🍋'], [/nudel|pasta|spaghetti/, '🍝'], [/reis/, '🍚'], [/kaffee/, '☕'], [/\btee\b/, '🍵'], [/butter/, '🧈'], [/avocado/, '🥑'], [/gurke/, '🥒'], [/karotte|möhre/, '🥕'], [/salat|spinat/, '🥬'], [/kartoffel/, '🥔'], [/zwiebel/, '🧅'], [/knoblauch/, '🧄'], [/wein/, '🍷'], [/bier/, '🍺'], [/wasser|sprudel/, '💧'], [/joghurt|müsli|haferflocken/, '🥣'], [/fisch|lachs/, '🐟'], [/hähnchen|huhn|fleisch|hack/, '🍗'], [/schoko/, '🍫'], [/zahnpasta|zahnbürste/, '🪥'], [/shampoo|duschgel|creme/, '🧴'], [/seife/, '🧼'], [/klopapier|toilettenpapier|küchenrolle/, '🧻'], [/erdbeer/, '🍓'], [/traube/, '🍇'], [/orange|mandarine/, '🍊'], [/pizza/, '🍕'], [/mehl/, '🌾'], [/honig/, '🍯'], [/basilikum|kräuter|petersilie/, '🌿'], [/blume/, '💐'], [/paprika/, '🫑'], [/pilz|champignon/, '🍄'], [/oliven/, '🫒'], [/kuchen|torte/, '🍰'], [/chips|brezel/, '🥨']];
+const emoOf = (t) => { const l = String(t).toLowerCase(); for (const [r, e] of EMO) if (r.test(l)) return e; return '🛒'; };
+const onList = () => data.shopping.filter((x) => !x.bought);
+function frequent() {
+  const listed = new Set(onList().map((x) => norm(x.title)));
+  const m = new Map();
+  for (const x of data.shopping) {
+    if (!x.bought) continue;
+    const k = norm(x.title); if (!k || listed.has(k)) continue;
+    const e = m.get(k) || { title: x.title, emoji: x.emoji, qty: x.qty, n: 0, last: 0 };
+    e.n++; if ((x.boughtAt || 0) > e.last) { e.last = x.boughtAt || 0; e.title = x.title; e.emoji = x.emoji; e.qty = x.qty; }
+    m.set(k, e);
+  }
+  return [...m.values()].sort((a, b) => b.n - a.n || b.last - a.last).slice(0, 10);
+}
+// Menge = Zahl + Einheit. Gespeichert als Text („2“, „500 g“, „1,5 l“); Stück ist die Grundeinheit ohne Zusatz.
+const UNITS = ['Stück', 'g', 'kg', 'ml', 'l'];
+const UNIT_RE = /^\s*(\d+(?:[.,]\d+)?)\s*(stück|stk\.?|x|kg|g|ml|l)?\s*$/i;
+function splitQty(q) {
+  const m = String(q || '').match(UNIT_RE); if (!m) return { n: '', u: 'Stück', raw: String(q || '') };
+  const u = (m[2] || '').toLowerCase(); return { n: m[1].replace('.', ','), u: UNITS.find((x) => x.toLowerCase() === u) || 'Stück' };
+}
+function joinQty(n, u) { n = String(n || '').trim(); if (!n) return ''; return u && u !== 'Stück' ? `${n} ${u}` : n; }
+const qtyLabel = (q) => { const s = splitQty(q); return s.n && s.u === 'Stück' && !s.raw ? `${s.n} Stück` : (q || ''); };
+const qtyField = (n, u) => `<div class="qtyf"><input class="qn" id="qN" inputmode="decimal" placeholder="Menge" value="${esc(n || '')}" autocomplete="off" aria-label="Menge"><label class="unitsel"><select id="qU" aria-label="Einheit">${UNITS.map((x) => `<option value="${x}"${x === (u || 'Stück') ? ' selected' : ''}>${UNIT_NAME[x]}</option>`).join('')}</select><svg viewBox="0 0 12 8" aria-hidden="true"><path d="M1 1.5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></label></div>`;
+const UNIT_NAME = { 'Stück': 'Stück', g: 'Gramm (g)', kg: 'Kilo (kg)', ml: 'Milliliter (ml)', l: 'Liter (l)' };
+const unitOf = (root) => { const sel = root.querySelector('#qU'); return sel ? sel.value : 'Stück'; };
+function setUnit(root, u) { const sel = root.querySelector('#qU'); if (sel) sel.value = u; }
+const shopCard = (x) => `<div class="row">${CK}<div><div class="t">${esc(x.emoji || emoOf(x.title))} ${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([qtyLabel(x.qty), x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
+function shopItems() {
+  // Wie bei Aufgaben: jedes Ding bekommt einen freien Platz (Mitte, dann rechts) und bleibt dort, bis man es verschiebt.
+  const items = onList().slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .map((x) => ({ key: x.id, v: x.pos ? x.pos.v : 0, free: true, pos: x.pos || null, views: [0, 1], html: shopCard(x), cls: pendingDone.has(x.id) ? 'done' : '' }));
+  for (const f of frequent()) items.push({ key: 'oft:' + norm(f.title), v: -1, html: `<div class="row"><span class="em">${esc(f.emoji || emoOf(f.title))}</span><div><div class="t">${esc(f.title)}</div><div class="s">${f.n}× gekauft</div><span class="add">+ Auf die Liste</span></div></div>` });
+  return { items, empty: { '-1': 'Hier landet, was du oft kaufst.', 0: 'Die Liste ist leer. Tipp auf eine freie Stelle.' } };
+}
+
+// --- Finanzen ---
+function monthData(key) {
+  const rs = data.receipts.filter((r) => r.date && r.date.startsWith(key));
+  return { rs, total: rs.reduce((s, r) => s + (r.total || 0), 0) };
+}
+// Vergleich mit dem Vormonat: im laufenden Monat nur bis zum gleichen Tag, sonst wirkt er immer billiger.
+function cutDay(m) { return m === monthKey(new Date()) ? new Date().getDate() : 31; }
+function prevUpTo(m) { const pm = shiftMonth(m, -1), d = cutDay(m); return monthData(pm).rs.filter((r) => +r.date.slice(8, 10) <= d); }
+const pct = (a, b) => Math.round((a - b) / b * 100);
+const sumOf = (rs) => rs.reduce((s, r) => s + (r.total || 0), 0);
+const WD = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+function weekdayAvg(y) {
+  const now = new Date(), end = String(now.getFullYear()) === y ? now : new Date(+y, 11, 31);
+  const cnt = [0, 0, 0, 0, 0, 0, 0], sum = [0, 0, 0, 0, 0, 0, 0];
+  for (let d = new Date(+y, 0, 1); d <= end; d.setDate(d.getDate() + 1)) cnt[(d.getDay() + 6) % 7]++;
+  for (const r of data.receipts) if (r.date && r.date.startsWith(y)) { const d = new Date(r.date + 'T12:00:00'); sum[(d.getDay() + 6) % 7] += r.total || 0; }
+  return sum.map((x, i) => (cnt[i] ? x / cnt[i] : 0));
+}
+function moneyItems() {
+  const m = state.month, cur = monthData(m), prev = monthData(shiftMonth(m, -1));
+  const mName = monthLabel(m).split(' ')[0], pName = monthLabel(shiftMonth(m, -1)).split(' ')[0];
+  const isNow = m === monthKey(new Date()), pRs = prevUpTo(m), pSum = sumOf(pRs);
+  const items = [];
+  // Links: Kategorien mit Monatssumme
+  const cats = CATEGORIES.map((c) => { const rs = cur.rs.filter((r) => (r.category || 'sonstiges') === c.id); return { ...c, rs, sum: rs.reduce((s, r) => s + r.total, 0) }; })
+    .filter((c) => c.sum > 0).sort((a, b) => b.sum - a.sum);
+  const top = cats[0] ? cats[0].sum : 1;
+  for (const c of cats) {
+    const ps = sumOf(pRs.filter((r) => (r.category || 'sonstiges') === c.id)), d = ps >= 2000 ? pct(c.sum, ps) : null;
+    const tag = d === null ? '' : ` <span class="dl ${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : '−'}${Math.abs(d)} %</span>`;
+    items.push({ key: 'cat:' + c.id, v: -1, cls: 'm', html: `<div class="row"><span class="em">${c.icon}</span><div><div class="t">${esc(c.name)}</div><div class="s">${esc(euro(c.sum))}${tag}</div></div></div><div class="bar"><i style="width:${Math.max(4, Math.round(c.sum / top * 100))}%"></i></div>` });
+  }
+  // Mitte: der Monat, mit Vergleich zum Vormonat bis zum gleichen Tag
+  let delta = `${cur.rs.length} ${cur.rs.length === 1 ? 'Beleg' : 'Belege'}`;
+  if (pSum > 0 && cur.total > 0) { const p = pct(cur.total, pSum); delta = `<span class="dl ${p > 0 ? 'up' : 'down'}">${p > 0 ? '▲' : '▼'} ${Math.abs(p)} %</span> zu ${esc(pName)}${isNow ? ` bis ${new Date().getDate()}.` : ''}`; }
+  items.push({ key: 'total', v: 0, cls: 'm', html: `<div class="k">Ausgegeben im ${esc(mName)}</div><div class="big">${esc(euro(cur.total))}</div><div class="s">${delta}</div>` });
+  if (cur.total > 0) {
+    const days = isNow ? new Date().getDate() : new Date(+m.slice(0, 4), +m.slice(5, 7), 0).getDate();
+    const byDay = new Map(); for (const r of cur.rs) byDay.set(r.date, (byDay.get(r.date) || 0) + (r.total || 0));
+    const [dTop, dSum] = [...byDay].sort((a, b) => b[1] - a[1])[0];
+    const dLbl = new Date(dTop + 'T12:00:00').toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'numeric' });
+    items.push({ key: 'day:' + dTop, v: 0, cls: 'm', html: `<div class="k">Pro Tag im Schnitt</div><div class="mid">${esc(euro(cur.total / days))}</div><div class="s">Teuerster Tag</div><div class="s" style="margin-top:1px;color:var(--ink)">${esc(dLbl)} · <b>${esc(euro(dSum))}</b></div>` });
+    const big = [...cur.rs].sort((a, b) => (b.total || 0) - (a.total || 0)).slice(0, 3);
+    items.push({ key: 'top', v: 0, cls: 'm', html: `<div class="k">Größte Ausgaben</div>${big.map((r) => `<div class="tr" data-rid="${esc(r.id)}"><span>${esc(r.merchant || CAT[r.category]?.name || 'Ausgabe')}</span><b>${esc(euro(r.total))}</b></div>`).join('')}` });
+  }
+  if (data.receipts.length) items.push({ key: 'search', v: 0, html: `<div class="t">🔍 Belege durchsuchen</div><div class="s">${data.receipts.length} insgesamt</div>` });
+  // Rechts: das Jahr
+  const y = m.slice(0, 4), months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
+  const sums = months.map((k) => monthData(k).total), ytotal = sums.reduce((a, b) => a + b, 0);
+  const used = sums.filter((x) => x > 0).length || 1, mx = Math.max(1, ...sums);
+  items.push({ key: 'year', v: 1, cls: 'm', html: `<div class="k">${y} bisher</div><div class="big">${esc(euroShort(ytotal))}</div><div class="s">Ø ${esc(euroShort(ytotal / used))} im Monat · Monat antippen</div>
+    <div class="yr">${sums.map((x, i) => `<i class="${months[i] === m ? 'sel' : ''}" style="height:${Math.max(4, Math.round(x / mx * 100))}%"></i>`).join('')}</div>
+    <div class="yrl">${'JFMAMJJASOND'.split('').map((c) => `<span>${c}</span>`).join('')}</div>` });
+  if (ytotal > 0) {
+    const wd = weekdayAvg(y), wmx = Math.max(1, ...wd), wi = wd.indexOf(Math.max(...wd));
+    items.push({ key: 'wd', v: 1, cls: 'm', html: `<div class="k">Nach Wochentag</div><div class="s">Ø pro Tag übers Jahr</div>
+      <div class="yr wd">${wd.map((x, i) => `<i class="${i === wi ? 'sel' : ''}" style="height:${Math.max(4, Math.round(x / wmx * 100))}%"></i>`).join('')}</div>
+      <div class="yrl">${WD.map((c) => `<span>${c}</span>`).join('')}</div>` });
+    const iMax = sums.indexOf(Math.max(...sums));
+    items.push({ key: 'ymax', v: 1, cls: 'm', html: `<div class="k">Teuerster Monat</div><div class="t" style="margin-top:6px">${esc(monthLabel(months[iMax]).split(' ')[0])}</div><div class="s">${esc(euro(sums[iMax]))}</div>` });
+  }
+  return { items, empty: { '-1': `Im ${mName} noch keine Ausgaben.` } };
+}
+
+// --- Projekte ---
+const IDEA_FIELDS = [
+  { key: 'short', label: 'Kurzbeschreibung' }, { key: 'idea', label: 'Idee' }, { key: 'goal', label: 'Ziel' },
+  { key: 'implementation', label: 'Umsetzung' }, { key: 'effort', label: 'Aufwand und Kosten' },
+  { key: 'summary', label: 'Aktueller Stand' }, { key: 'questions', label: 'Offene Fragen' },
+];
+const shortDate = (ts) => new Date(ts).toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+function projItems() {
+  const items = [];
+  const blitze = data.ideas.filter(isBlitz).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  for (const b of blitze) items.push({ key: b.id, v: -1, free: true, views: [-1], pos: b.pos && b.pos.v === -1 ? b.pos : null, html: `<div class="blitz"><b>⚡</b>${esc(b.idea || b.title || '')}</div><div class="s">${esc(shortDate(b.createdAt || b.updatedAt || Date.now()))}</div>` });
+  const projs = data.ideas.filter(isProject).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  projs.forEach((p) => items.push({ key: p.id, v: p.pos && p.pos.v >= 0 ? p.pos.v : 0, free: true, views: [0, 1], pos: p.pos && p.pos.v >= 0 ? p.pos : null, html: `<div class="t">${p.seenAt ? '' : '<span class="dot"></span>'}${esc(p.title || 'Ohne Titel')}</div>${p.short || p.summary ? `<div class="s">${esc(p.short || p.summary)}</div>` : ''}` }));
+  return { items, empty: { '-1': 'Tipp auf eine freie Stelle und halte einen Gedanken fest.', 0: 'Noch keine Projekte. Sag Claude: „Hol meine Gedankenblitze“.' } };
+}
+
+// --- Mehr ---
+function moreItems() {
+  const s = backupSettings.get();
+  const when = (iso) => (iso ? new Date(iso).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : 'noch nie');
+  return { items: [
+    { key: 'sync', v: 0, cls: 'mehr', html: `<div class="t"><span class="status-dot ${s.syncError ? 'err' : s.syncAt ? 'ok' : ''}"></span>Abgleich</div><div class="s">${esc(s.syncError ? 'Fehler' : when(s.syncAt))}</div>` },
+    { key: 'backup', v: 0, cls: 'mehr', html: `<div class="t"><span class="status-dot ${s.lastError ? 'err' : s.lastAt ? 'ok' : ''}"></span>Sicherung</div><div class="s">${esc(when(s.lastAt))}</div>` },
+    { key: 'offline', v: 0, cls: 'mehr', html: `<div class="t"><span class="status-dot ${offline.shell ? 'ok' : ''}"></span>Offline</div><div class="s">${offline.shell ? (offline.ocr ? 'Alles bereit' : 'Texterkennung lädt') : 'Wird vorbereitet'}</div>` },
+    { key: 'files', v: 0, cls: 'mehr', html: '<div class="t">Backup als Datei</div><div class="s">Export und Import</div>' },
+  ] };
+}
+
+// ---------- Kopfzeile ----------
+function head(si, v) {
+  const n = (x) => x.length;
+  if (si === TODO) {
+    const list = openTodos();
+    const over = list.filter((t) => t.due && t.due < today()).length;
+    return { k: '', t: 'Aufgaben', l: `${n(list)} offen${over ? ` · ${over} überfällig` : ''}` };
+  }
+  if (si === SHOP) return { k: VNAME[si][v], t: 'Einkauf', l: v === -1 ? 'Antippen setzt es auf die Liste' : `${n(onList())} ${n(onList()) === 1 ? 'Ding' : 'Dinge'} auf der Liste` };
+  if (si === MONEY) {
+    const mName = monthLabel(state.month);
+    return { k: v === 1 ? `Das Jahr ${state.month.slice(0, 4)}` : v === -1 ? 'Kategorien' : mName, t: 'Finanzen', l: v === 1 ? 'Alle Monate auf einen Blick' : `${euro(monthData(state.month).total)} im ${mName.split(' ')[0]}` };
+  }
+  if (si === PROJ) {
+    if (v === -1) { const b = data.ideas.filter(isBlitz).length; return { k: 'Gedankenblitze', t: 'Projekte', l: `${b} ${b === 1 ? 'Gedanke' : 'Gedanken'} · Claude macht Projekte daraus` }; }
+    const p = data.ideas.filter(isProject).length;
+    return { k: VNAME[si][v], t: 'Projekte', l: `${p} ${p === 1 ? 'Projekt' : 'Projekte'}` };
+  }
+  return { k: 'Am Ende des Wegs', t: 'Mehr', l: 'Abgleich, Sicherung und Einstellungen' };
+}
+const tip = (si) => (si === MORE ? '' : si === PROJ ? 'Auf eine freie Stelle tippen, um einen Gedanken festzuhalten' : 'Auf eine freie Stelle tippen, um etwas anzulegen');
+
+// ---------- Antippen von Karten ----------
+const pendingDone = new Set();
+async function onCardTap(h) {
+  const { si, key, lx } = h;
+  if (si === TODO) {
+    const t = data.todos.find((x) => x.id === key); if (!t) return;
+    if (lx < 42) return completeTodo(t);
+    return todoSheet(t);
+  }
+  if (si === SHOP) {
+    if (key.startsWith('oft:')) {
+      const f = frequent().find((x) => 'oft:' + norm(x.title) === key); if (!f) return;
+      const rect = weg.cardRect(SHOP, key);
+      return addShop({ title: f.title, qty: f.qty || '', emoji: f.emoji }, rect, 'Wieder auf der Liste');
+    }
+    const x = data.shopping.find((y) => y.id === key); if (!x) return;
+    if (lx < 42) return buyShop(x);
+    return shopSheet(x);
+  }
+  if (si === MONEY) {
+    if (key.startsWith('cat:')) return categorySheet(key.slice(4));
+    if (key === 'year') {
+      const i = Math.max(0, Math.min(11, Math.floor((lx - 12) / Math.max(1, h.w - 24) * 12)));
+      state.month = `${state.month.slice(0, 4)}-${String(i + 1).padStart(2, '0')}`;
+      refresh(MONEY); toast(`${monthLabel(state.month)} gewählt`, { action: 'Zeigen', onAction: () => weg.setView(0) });
+      return;
+    }
+    if (key.startsWith('day:')) return daySheet(key.slice(4));
+    if (key === 'top') {
+      const row = [...h.el.querySelectorAll('[data-rid]')].find((e) => { const r = e.getBoundingClientRect(); return h.y >= r.top - 4 && h.y <= r.bottom + 4; });
+      const rec = row && data.receipts.find((r) => r.id === row.dataset.rid);
+      return rec ? editReceipt(rec) : receiptsSheet();
+    }
+    if (key === 'wd') return;
+    if (key === 'search' || key === 'last' || key === 'total') return receiptsSheet();
+    if (key === 'ymax') return;
+  }
+  if (si === PROJ) {
+    const i = data.ideas.find((x) => x.id === key); if (!i) return;
+    return isBlitz(i) ? blitzSheet(i) : projectSheet(i);
+  }
+  if (si === MORE) return settingsSheet();
+}
+function onMore(si, v) {
+  if (si === PROJ) return projectList();
+  if (si === TODO) return listSheet('Alle Aufgaben', openTodos().map((t) => ({ title: t.title, sub: dueText(t), open: () => todoSheet(t) })));
+  if (si === SHOP) return listSheet('Einkaufsliste', onList().map((x) => ({ title: `${x.emoji || emoOf(x.title)} ${x.title}`, sub: x.qty, open: () => shopSheet(x) })));
+  if (si === MONEY && v === -1) return receiptsSheet();
+}
+
+async function completeTodo(t) {
+  const el = weg.cardEl(TODO, t.id);
+  const wait = celebrate(el);
+  pendingDone.add(t.id); refresh(TODO);
+  setTimeout(async () => {
+    pendingDone.delete(t.id);
+    const cur = await db.get('todos', t.id); if (!cur) return;
+    await db.put('todos', { ...cur, done: true, doneAt: Date.now() });
+    await changed(TODO);
+    toast('Erledigt', { action: 'Rückgängig', onAction: async () => { const c = await db.get('todos', t.id); if (c) { await db.put('todos', { ...c, done: false, doneAt: null }); await changed(TODO); } } });
+  }, wait || 420);
+}
+async function buyShop(x) {
+  pendingDone.add(x.id); refresh(SHOP);
+  setTimeout(async () => {
+    pendingDone.delete(x.id);
+    const cur = await db.get('shopping', x.id); if (!cur) return;
+    await db.put('shopping', { ...cur, bought: true, boughtAt: Date.now() });
+    await changed(SHOP);
+    toast(`${cur.title} abgehakt`, { action: 'Rückgängig', onAction: async () => { const c = await db.get('shopping', x.id); if (c) { await db.put('shopping', { ...c, bought: false, boughtAt: null }); await changed(SHOP); } } });
+  }, 380);
+}
+async function addShop({ title, qty = '', emoji, note = '' }, rect, msg) {
+  const same = onList().find((x) => Q.looseKey(x.title) === Q.looseKey(title));
+  if (same) {
+    const next = Q.mergeQty(same.qty || '1', qty || '1');
+    await db.put('shopping', { ...same, qty: next });
+    await changed(SHOP);
+    toast(`${same.title} steht schon drauf, Menge erhöht`);
+    return;
+  }
+  const id = uid();
+  await db.put('shopping', { id, title, qty, emoji: emoji || emoOf(title), note, bought: false, createdAt: Date.now() });
+  await changed(SHOP, rect ? { [id]: rect } : null);
+  if (msg) toast(msg);
+}
+
+// Halten und Ziehen: Aufgaben, Einkauf und Projekte merken sich ihren Platz (Seite + x/y).
+async function onReorder() {}
+async function onPlace(si, list) {
+  const store = si === TODO ? 'todos' : si === SHOP ? 'shopping' : si === PROJ ? 'ideas' : null;
+  if (!store) return;
+  for (const { key, pos } of list) {
+    const rec = await db.get(store, key);
+    if (rec) await db.put(store, { ...rec, pos });
+  }
+  markDirty(); await load(); scheduleSync();
+}
+
+// ---------- Blätter ----------
+const sheet = $('#sheet'), veil = $('#veil');
+let sheetClose = null;
+function openSheet(html, onClose) {
+  if (cmpCtx) closeCmp();
+  sheet.innerHTML = `<button class="grab" type="button" aria-label="Schließen"><i></i></button>${html}`;
+  sheet.classList.add('on'); veil.classList.add('on');
+  sheetClose = onClose || null;
+  weg && weg.pause(true);
+  const body = sheet.querySelector('.sbody'); if (body) body.scrollTop = 0;
+  sheet.querySelector('.grab').addEventListener('click', () => closeSheet());
+  bindSheetDrag();
+}
+async function closeSheet(skipHandler) {
+  if (!sheet.classList.contains('on')) return;
+  const h = sheetClose; sheetClose = null;
+  const a = document.activeElement; if (a && a.blur) a.blur();
+  sheet.classList.remove('on'); veil.classList.remove('on');
+  weg && weg.pause(false);
+  if (h && !skipHandler) await h();
+  setTimeout(() => { if (!sheet.classList.contains('on')) sheet.innerHTML = ''; }, 400);
+}
+veil.addEventListener('pointerup', () => closeSheet());
+// Schutz für Knöpfe im Blatt: Ein Klick zählt nur, wenn der Finger auch auf genau diesem Knopf aufgesetzt hat und
+// nicht gerade ein Auswahlrad oder die Tastatur zugegangen ist. Sonst rutscht z. B. das Schließen des iPhone-
+// Einheitenrads als Tipp auf „Abhaken“ durch.
+let sheetDown = null, fieldAt = 0;
+sheet.addEventListener('pointerdown', (e) => { sheetDown = { el: e.target.closest('button'), at: Date.now() }; }, true);
+for (const ev of ['change', 'focusout']) sheet.addEventListener(ev, (e) => { if (e.target.matches && e.target.matches('select')) fieldAt = Date.now(); }, true);
+sheet.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]:not([data-act="close"])'); if (!b) return;
+  const ok = sheetDown && sheetDown.el === b && Date.now() - sheetDown.at < 1500 && Date.now() - fieldAt > 450;
+  if (!ok) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+// Blatt am Griff nach unten ziehen schließt es
+function bindSheetDrag() {
+  const grab = sheet.querySelector('.grab'), headEl = sheet.querySelector('.shead');
+  let y0 = null, dy = 0;
+  const start = (e) => { y0 = e.clientY; dy = 0; sheet.style.transition = 'none'; };
+  const move = (e) => { if (y0 == null) return; dy = Math.max(0, e.clientY - y0); sheet.style.transform = `translateY(${dy}px)`; };
+  const end = () => { if (y0 == null) return; y0 = null; sheet.style.transition = ''; sheet.style.transform = ''; if (dy > 90) closeSheet(); };
+  for (const el of [grab, headEl].filter(Boolean)) {
+    el.addEventListener('pointerdown', (e) => { if (e.target.closest('button:not(.grab),input,textarea')) return; start(e); el.setPointerCapture && el.setPointerCapture(e.pointerId); });
+    el.addEventListener('pointermove', move); el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+  }
+}
+const sheetHead = (title, right = '<button class="link" data-act="close">Fertig</button>') => `<div class="shead"><div class="grow">${title ? `<h2>${esc(title)}</h2>` : ''}</div>${right}</div>`;
+function bindClose() { const b = sheet.querySelector('[data-act="close"]'); if (b) b.onclick = () => closeSheet(); }
+function listSheet(title, rows) {
+  openSheet(`${sheetHead(title)}<div class="sbody"><div class="list">${rows.map((r, i) => `<div class="lrow" data-i="${i}"><div class="grow"><div class="title">${esc(r.title)}</div>${r.sub ? `<div class="sub">${esc(r.sub)}</div>` : ''}</div></div>`).join('')}</div></div>`);
+  bindClose();
+  sheet.querySelectorAll('[data-i]').forEach((el) => el.addEventListener('click', () => { const r = rows[+el.dataset.i]; closeSheet().then(() => setTimeout(r.open, 80)); }));
+}
+
+// --- Aufgabe ---
+// Deadline (optional): Schnellwahl und Erkennung im Text („bis morgen“, „Samstag“ …)
+const WHEN = [['Heute', /\b(bis )?heute\b/i], ['Morgen', /\b(bis )?morgen\b/i], ['Wochenende', /\b(bis )?(zum |am )?(wochenende|samstag|sonntag)\b/i], ['Nächste Woche', /\b(bis )?nächste[n]? woche\b/i]];
+function whenDue(w) {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  if (w === 'Heute') return toISODate(d);
+  if (w === 'Morgen') { d.setDate(d.getDate() + 1); return toISODate(d); }
+  if (w === 'Wochenende') { const wd = d.getDay(); d.setDate(d.getDate() + (wd === 6 || wd === 0 ? 0 : 6 - wd)); return toISODate(d); }
+  if (w === 'Nächste Woche') { const wd = d.getDay(); d.setDate(d.getDate() + (((8 - wd) % 7) || 7)); return toISODate(d); }
+  return null;
+}
+// Datumsfeld: sieht aus wie ein Knopf mit Kalender, darüber liegt unsichtbar das echte Datumsfeld (öffnet den iOS-Picker).
+const CAL = '<svg class="dico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+function dateLabel(iso) {
+  if (!iso) return 'Datum wählen';
+  const d = new Date(iso + 'T12:00:00');
+  return `${d.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'long' })} · ${dueFlag(iso)}`;
+}
+const dateField = (id, wrapId, val) => `<div class="datef${val ? ' set' : ''}" id="${wrapId}">${CAL}<span class="dtxt">${esc(dateLabel(val))}</span><input id="${id}" type="date" value="${esc(val || '')}" aria-label="Deadline wählen"><button type="button" class="clr" data-act="clr" aria-label="Deadline entfernen">×</button></div>`;
+function syncDateField(wrap) { const i = wrap.querySelector('input'); wrap.classList.toggle('set', !!i.value); wrap.querySelector('.dtxt').textContent = dateLabel(i.value); }
+function todoSheet(t) {
+  let due = t.due || null;
+  openSheet(`${sheetHead('')}<div class="sbody">
+      <textarea class="ttl" id="t-title" rows="2">${esc(t.title)}</textarea>
+      <div class="field"><span>Deadline</span>${dateField('t-due', 't-df', due)}</div>
+      <label class="field"><span>Notiz</span><textarea id="t-note" rows="3" placeholder="Optional">${esc(t.note || '')}</textarea></label>
+      <div class="btn-row"><button class="btn primary" data-act="done">Erledigt</button><button class="btn danger" data-act="delete">Löschen</button></div>
+    </div>`, async () => {
+    const title = $('#t-title').value.trim() || t.title, note = $('#t-note').value.trim();
+    const cur = await db.get('todos', t.id); if (!cur) return;
+    if (title !== cur.title || note !== (cur.note || '') || due !== (cur.due || null)) {
+      await db.put('todos', { ...cur, title, note, due });
+      await changed(TODO);
+    }
+  });
+  bindClose();
+  const setDue = (d) => { due = d; $('#t-due').value = due || ''; syncDateField($('#t-df')); };
+  $('#t-df .clr').addEventListener('click', () => setDue(null));
+  $('#t-due').addEventListener('change', (e) => setDue(e.target.value || null));
+  sheet.querySelector('[data-act="done"]').onclick = async () => { await closeSheet(); completeTodo(t); };
+  sheet.querySelector('[data-act="delete"]').onclick = async () => {
+    await closeSheet(true);
+    const orig = await db.get('todos', t.id); await db.delete('todos', t.id); await changed(TODO);
+    toast('Aufgabe gelöscht', { action: 'Rückgängig', onAction: async () => { await db.put('todos', orig); await changed(TODO); } });
+  };
+}
+
+// --- Rezept-Link: Zutaten erkennen und auswählen ---
+const isLink = (t) => /^(https?:\/\/|www\.)\S+$/i.test(String(t).trim());
+async function recipeFromLink(link) {
+  const s = backupSettings.get();
+  if (!s.token) { toast('Rezepte gehen über deinen Server. Richte unter Mehr den Abgleich ein.'); return; }
+  if (!navigator.onLine) { toast('Für Rezept-Links braucht es Internet.'); return; }
+  toast('Rezept wird gelesen …');
+  const url = /^www\./i.test(link) ? 'https://' + link : link;
+  try {
+    const res = await fetch((s.url || location.origin).replace(/\/$/, '') + '/api/recipe', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + s.token }, body: JSON.stringify({ url }) });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(r.error || 'Das Rezept ließ sich nicht lesen.'); return; }
+    clearTimeout(toastT); toastEl.classList.remove('show');
+    recipeSheet(r);
+  } catch { toast('Der Server ist gerade nicht erreichbar.'); }
+}
+function onListText(x) {
+  const cur = x.on.qty || '', next = x.qty ? Q.mergeQty(cur || '1', x.qty) : cur;
+  return next && next !== (cur || '1') ? `steht schon drauf, wird ${qtyLabel(next)}` : `steht schon drauf${cur ? ' (' + qtyLabel(cur) + ')' : ''}`;
+}
+function recipeSheet(r) {
+  const listed = onList();
+  const rows = r.items.map((it, i) => { const on = listed.find((x) => Q.looseKey(x.title) === Q.looseKey(it.title)); return { ...it, i, sel: !it.pantry, on }; });
+  const draw = () => rows.map((x) => `<div class="lrow rcp${x.sel ? ' sel' : ''}" data-i="${x.i}"><span class="rck"></span><div class="grow"><div class="title">${esc(x.title)}</div><div class="sub">${esc([x.qty ? qtyLabel(x.qty) : '', x.on ? onListText(x) : x.pantry ? 'hast du wahrscheinlich da' : ''].filter(Boolean).join(' · '))}</div></div></div>`).join('');
+  const count = () => rows.filter((x) => x.sel).length;
+  openSheet(`${sheetHead(r.name || 'Rezept')}<div class="sbody"><p class="muted" style="margin:0 0 10px">${r.servings ? esc(r.servings) + ' · ' : ''}Antippen wählt ab oder aus.</p><div class="list" id="rc-list">${draw()}</div>
+    <div class="btn-row"><button class="btn primary" data-act="add" id="rc-add">${count()} auf die Liste</button></div></div>`);
+  bindClose();
+  const list = $('#rc-list');
+  list.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-i]'); if (!row) return;
+    const x = rows[+row.dataset.i]; x.sel = !x.sel; row.classList.toggle('sel', x.sel);
+    $('#rc-add').textContent = `${count()} auf die Liste`;
+  });
+  $('#rc-add').onclick = async () => {
+    const pick = rows.filter((x) => x.sel); if (!pick.length) return closeSheet();
+    let added = 0, merged = 0;
+    for (const it of pick) {
+      const same = onList().find((x) => Q.looseKey(x.title) === Q.looseKey(it.title));
+      if (same) { await db.put('shopping', { ...same, qty: it.qty ? Q.mergeQty(same.qty || '1', it.qty) : same.qty }); merged++; }
+      else { await db.put('shopping', { id: uid(), title: it.title, qty: it.qty || '', emoji: emoOf(it.title), note: '', bought: false, createdAt: Date.now() }); added++; }
+      await load();
+    }
+    await closeSheet(); await changed(SHOP);
+    toast(`${added} neu auf der Liste${merged ? `, ${merged} zusammengelegt` : ''}`);
+  };
+}
+
+// --- Einkauf ---
+function shopSheet(x) {
+  let qty = x.qty || '';
+  openSheet(`${sheetHead('')}<div class="sbody">
+      <textarea class="ttl" id="s-title" rows="1">${esc(x.title)}</textarea>
+      <div class="lab">Menge</div>
+      ${(() => { const s = splitQty(qty); return qtyField(s.raw || s.n, s.u); })()}
+      <label class="field"><span>Notiz</span><input id="s-note" value="${esc(x.note || '')}" placeholder="z. B. die Barista-Sorte"></label>
+      <div class="btn-row"><button class="btn primary" data-act="buy">Abhaken</button><button class="btn danger" data-act="delete">Löschen</button></div>
+    </div>`, async () => {
+    const cur = await db.get('shopping', x.id); if (!cur) return;
+    const title = $('#s-title').value.trim() || cur.title, q = joinQty($('#qN').value, unitOf(sheet)), note = $('#s-note').value.trim();
+    if (title !== cur.title || q !== (cur.qty || '') || note !== (cur.note || '')) { await db.put('shopping', { ...cur, title, qty: q, note, emoji: title !== cur.title ? emoOf(title) : cur.emoji }); await changed(SHOP); }
+  });
+  bindClose();
+  sheet.querySelector('[data-act="buy"]').onclick = async () => { await closeSheet(); buyShop(x); };
+  sheet.querySelector('[data-act="delete"]').onclick = async () => {
+    await closeSheet(true);
+    const orig = await db.get('shopping', x.id); await db.delete('shopping', x.id); await changed(SHOP);
+    toast('Gelöscht', { action: 'Rückgängig', onAction: async () => { await db.put('shopping', orig); await changed(SHOP); } });
+  };
+}
+
+// --- Projekte ---
+function blitzSheet(b) {
+  openSheet(`${sheetHead('Gedankenblitz')}<div class="sbody">
+      <p class="muted small" style="margin:0 0 10px">${esc(new Date(b.createdAt || Date.now()).toLocaleString('de-DE', { dateStyle: 'long', timeStyle: 'short' }))}</p>
+      <textarea class="inp" id="b-text" rows="6" style="font-size:17px;line-height:1.4">${esc(b.idea || b.title || '')}</textarea>
+      <p class="hint" style="margin-top:12px">Sag Claude zum Beispiel: „Hol meine Gedankenblitze und lass uns einen ausarbeiten.“ Daraus wird dann ein Projekt in der Mitte.</p>
+      <button class="btn danger block" data-act="delete">Löschen</button>
+    </div>`, async () => {
+    const cur = await db.get('ideas', b.id); if (!cur) return;
+    const text = $('#b-text').value.trim();
+    if (text && text !== (cur.idea || '')) { await db.put('ideas', { ...cur, idea: text }); await changed(PROJ); }
+  });
+  bindClose();
+  sheet.querySelector('[data-act="delete"]').onclick = async () => {
+    await closeSheet(true);
+    const orig = await db.get('ideas', b.id); await db.delete('ideas', b.id); await changed(PROJ);
+    toast('Gedanke gelöscht', { action: 'Rückgängig', onAction: async () => { await db.put('ideas', orig); await changed(PROJ); } });
+  };
+}
+function projectSheet(p) {
+  const secs = IDEA_FIELDS.filter((f) => (p[f.key] || '').trim()).map((f) => `<div class="sec"><h4>${esc(f.label)}</h4><p class="txt">${esc(p[f.key])}</p></div>`).join('');
+  const log = (p.log || []).slice().reverse();
+  openSheet(`${sheetHead(p.title || 'Projekt')}<div class="sbody">
+      ${p.blitzAt ? `<p class="muted small" style="margin:0 0 6px">Aus deinem Gedankenblitz vom ${esc(new Date(p.blitzAt).toLocaleDateString('de-DE', { day: 'numeric', month: 'long' }))}</p>` : ''}
+      ${secs || '<p class="muted">Noch keine Details. Claude füllt das Projekt, wenn ihr darüber sprecht.</p>'}
+      ${log.length ? `<details class="raw" style="margin-top:18px"><summary>Verlauf (${log.length})</summary>${log.map((e) => `<p class="small" style="margin:0 0 8px"><span class="muted">${esc(new Date(e.at).toLocaleDateString('de-DE'))} · ${e.by === 'claude' ? 'Claude' : 'Du'}</span><br>${esc(e.text)}</p>`).join('')}</details>` : ''}
+      <button class="btn primary block" data-act="end" style="margin-top:18px">Beenden</button>
+    </div>`);
+  bindClose();
+  if (!p.seenAt) db.put('ideas', { ...p, seenAt: Date.now() }).then(() => changed(PROJ));
+  sheet.querySelector('[data-act="end"]').onclick = async () => {
+    await closeSheet(true);
+    const orig = await db.get('ideas', p.id); await db.delete('ideas', p.id); await changed(PROJ);
+    toast('Projekt beendet', { action: 'Rückgängig', onAction: async () => { await db.put('ideas', orig); await changed(PROJ); } });
+  };
+}
+function projectList() {
+  const all = ordered(data.ideas.filter(isProject), (a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  openSheet(`${sheetHead('Alle Projekte')}<div class="sbody"><input class="search" id="p-q" type="search" placeholder="Suchen"><div class="list" id="p-list"></div></div>`);
+  bindClose();
+  const draw = () => {
+    const q = norm($('#p-q').value);
+    const rows = all.filter((p) => !q || norm([p.title, ...IDEA_FIELDS.map((f) => p[f.key])].join(' ')).includes(q));
+    $('#p-list').innerHTML = rows.map((p) => `<div class="lrow" data-id="${p.id}"><div class="grow"><div class="title">${esc(p.title)}</div>${p.short ? `<div class="sub">${esc(p.short)}</div>` : ''}</div></div>`).join('') || '<p class="muted" style="padding:14px">Nichts gefunden.</p>';
+    sheet.querySelectorAll('[data-id]').forEach((el) => el.addEventListener('click', () => { const p = all.find((x) => x.id === el.dataset.id); closeSheet().then(() => setTimeout(() => projectSheet(p), 80)); }));
+  };
+  $('#p-q').addEventListener('input', draw); draw();
+}
+
+// --- Finanzen ---
+const imageUrls = new Map();
+function imageUrl(r) { if (!r.image) return null; if (!imageUrls.has(r.id)) imageUrls.set(r.id, URL.createObjectURL(r.image)); return imageUrls.get(r.id); }
+function dropImageUrl(id) { const u = imageUrls.get(id); if (u) { URL.revokeObjectURL(u); imageUrls.delete(id); } }
+function receiptRow(r) {
+  const c = CAT[r.category] || CAT.sonstiges; const img = imageUrl(r);
+  return `<div class="lrow" data-rid="${r.id}">${img ? `<img class="thumb" src="${img}" alt="">` : `<div class="thumb">${c.icon}</div>`}
+    <div class="grow"><div class="title">${esc(r.merchant || c.name)}</div><div class="sub">${esc(formatDate(r.date))} · ${esc(c.name)}</div></div><div class="amount">${esc(euro(r.total))}</div></div>`;
+}
+function bindReceiptRows(root) {
+  root.querySelectorAll('[data-rid]').forEach((row) => row.addEventListener('click', async () => {
+    const r = await db.get('receipts', row.dataset.rid);
+    if (r) closeSheet(true).then(() => setTimeout(() => editReceipt(r), 80));
+  }));
+}
+function weekLabel(iso) {
+  const d = new Date(iso); const wd = (d.getDay() + 6) % 7; d.setDate(d.getDate() - wd);
+  const e = new Date(d); e.setDate(e.getDate() + 6);
+  const f = (x) => x.toLocaleDateString('de-DE', { day: 'numeric', month: 'short' });
+  return `${f(d)} – ${f(e)}`;
+}
+function categorySheet(cat) {
+  const c = CAT[cat] || CAT.sonstiges;
+  const rs = monthData(state.month).rs.filter((r) => (r.category || 'sonstiges') === cat).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const groups = new Map(); for (const r of rs) { const k = weekLabel(r.date); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+  openSheet(`${sheetHead(`${c.icon} ${c.name}`)}<div class="sbody"><p class="muted" style="margin:0 0 4px">${esc(monthLabel(state.month))} · ${esc(euro(rs.reduce((s, r) => s + r.total, 0)))}</p>
+    ${[...groups].map(([k, list]) => `<div class="gh"><span>${esc(k)}</span><span>${esc(euro(list.reduce((s, r) => s + r.total, 0)))}</span></div><div class="list">${list.map(receiptRow).join('')}</div>`).join('')}</div>`);
+  bindClose(); bindReceiptRows(sheet);
+}
+function daySheet(iso) {
+  const rs = data.receipts.filter((r) => r.date === iso).sort((a, b) => (b.total || 0) - (a.total || 0));
+  const lbl = new Date(iso + 'T12:00:00').toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' });
+  openSheet(`${sheetHead(lbl)}<div class="sbody"><p class="muted" style="margin:0 0 4px">${rs.length} ${rs.length === 1 ? 'Beleg' : 'Belege'} · ${esc(euro(sumOf(rs)))}</p><div class="list">${rs.map(receiptRow).join('')}</div></div>`);
+  bindClose(); bindReceiptRows(sheet);
+}
+function receiptsSheet() {
+  const all = data.receipts.slice().sort((a, b) => (a.date === b.date ? (b.createdAt || 0) - (a.createdAt || 0) : a.date < b.date ? 1 : -1));
+  openSheet(`${sheetHead('Belege')}<div class="sbody"><input class="search" id="r-q" type="search" placeholder="Suchen, z. B. IKEA"><div id="r-sum" class="muted small" style="margin:-4px 4px 10px"></div><div id="r-list"></div></div>`);
+  bindClose();
+  const draw = () => {
+    const q = norm($('#r-q').value);
+    const rows = q ? all.filter((r) => norm(`${r.merchant} ${r.note} ${CAT[r.category]?.name}`).includes(q)) : all.filter((r) => r.date.startsWith(state.month));
+    $('#r-sum').textContent = q ? `${rows.length} Treffer · ${euro(rows.reduce((s, r) => s + r.total, 0))}` : `${monthLabel(state.month)} · Suche geht über alle Monate`;
+    const groups = new Map(); for (const r of rows) { const k = r.date.slice(0, 7); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+    $('#r-list').innerHTML = [...groups].map(([k, list]) => `<div class="gh"><span>${esc(monthLabel(k))}</span><span>${esc(euro(list.reduce((s, r) => s + r.total, 0)))}</span></div><div class="list">${list.slice(0, 200).map(receiptRow).join('')}</div>`).join('') || '<p class="muted" style="padding:10px 4px">Nichts gefunden.</p>';
+    bindReceiptRows(sheet);
+  };
+  $('#r-q').addEventListener('input', draw); draw();
+}
+function editReceipt(r, hint) {
+  const photoUrl = r.image ? URL.createObjectURL(r.image) : null;
+  let category = r.category || 'sonstiges';
+  openSheet(`${sheetHead(r.isNew ? 'Neuer Beleg' : 'Beleg', '<button class="link" data-act="save">Sichern</button>')}<div class="sbody">
+    ${hint ? `<p class="hint">${esc(hint)}</p>` : ''}
+    ${photoUrl ? `<img class="receipt-photo" src="${photoUrl}" alt="Foto des Belegs">` : ''}
+    <label class="field"><span>Betrag (€)</span><input id="r-total" class="big" inputmode="decimal" placeholder="0,00" value="${esc(centsToInput(r.total))}"></label>
+    <label class="field"><span>Händler</span><input id="r-merchant" value="${esc(r.merchant || '')}" placeholder="z. B. Rewe"></label>
+    <label class="field"><span>Datum</span><input id="r-date" type="date" value="${esc(r.date || '')}"></label>
+    <div class="lab">Kategorie</div><div class="chips">${CATEGORIES.map((c) => `<button type="button" class="chip${c.id === category ? ' on' : ''}" data-cat="${c.id}">${c.icon} ${esc(c.name)}</button>`).join('')}</div>
+    <label class="field"><span>Notiz</span><input id="r-note" value="${esc(r.note || '')}" placeholder="optional"></label>
+    ${r.ocrText ? `<details class="raw"><summary>Erkannter Text</summary><pre>${esc(r.ocrText)}</pre></details>` : ''}
+    ${r.isNew ? '' : '<button class="btn danger block" data-act="delete" style="margin-top:10px">Beleg löschen</button>'}
+  </div>`, () => { if (photoUrl) URL.revokeObjectURL(photoUrl); });
+  sheet.querySelectorAll('[data-cat]').forEach((b) => b.addEventListener('click', () => { category = b.dataset.cat; sheet.querySelectorAll('[data-cat]').forEach((x) => x.classList.toggle('on', x === b)); }));
+  sheet.querySelector('[data-act="save"]').onclick = async () => {
+    const total = parseEuroInput($('#r-total').value);
+    if (total == null || total <= 0) { toast('Bitte einen Betrag eintragen'); $('#r-total').focus(); return; }
+    const rec = { id: r.id, merchant: $('#r-merchant').value.trim(), date: $('#r-date').value || toISODate(new Date()), total, category, note: $('#r-note').value.trim(), image: r.image || null, ocrText: r.ocrText || '', createdAt: r.createdAt || Date.now() };
+    await db.put('receipts', rec); dropImageUrl(rec.id);
+    state.month = rec.date.slice(0, 7);
+    await closeSheet(); await changed(MONEY);
+    toast(r.isNew ? `${euro(total)} eingetragen` : 'Gespeichert');
+  };
+  const del = sheet.querySelector('[data-act="delete"]');
+  if (del) del.onclick = async () => {
+    await closeSheet(true);
+    const orig = await db.get('receipts', r.id); await db.delete('receipts', r.id); dropImageUrl(r.id); await changed(MONEY);
+    toast('Beleg gelöscht', { action: 'Rückgängig', onAction: async () => { await db.put('receipts', orig); await changed(MONEY); } });
+  };
+}
+function chooseSource() {
+  openSheet(`${sheetHead('Beleg scannen', '<button class="link" data-act="close">Abbrechen</button>')}<div class="sbody"><div style="display:grid;gap:10px">
+    <button class="btn primary block" data-act="camera">📷 Foto aufnehmen</button>
+    <button class="btn block" data-act="long">🧾 Langer Bon: in Teilen fotografieren</button>
+    <button class="btn block" data-act="gallery">🖼️ Aus Fotos wählen</button></div>
+    <p class="hint" style="margin-top:14px">Bon flach auf einen dunklen Untergrund legen und gerade von oben fotografieren. Ist er so lang, dass die Schrift auf einem Foto winzig wird, nimm ihn in zwei oder drei Teilen von oben nach unten auf. Aus Fotos kannst du auch mehrere Teile auf einmal wählen. Die Texterkennung läuft auf deinem iPhone.</p></div>`);
+  bindClose();
+  sheet.querySelector('[data-act="camera"]').onclick = () => { closeSheet(true); scanParts = null; $('#camera').click(); };
+  sheet.querySelector('[data-act="long"]').onclick = () => { closeSheet(true); scanParts = []; $('#camera').click(); };
+  sheet.querySelector('[data-act="gallery"]').onclick = () => { closeSheet(true); scanParts = null; $('#gallery').click(); };
+}
+// Langer Bon: Teile sammeln, nach jedem Foto fragen, ob noch einer kommt
+let scanParts = null;
+function morePartsSheet() {
+  const n = scanParts.length;
+  openSheet(`${sheetHead(`Teil ${n} aufgenommen`, '<button class="link" data-act="close">Abbrechen</button>')}<div class="sbody">
+    <p class="hint">Fotografier als Nächstes das Stück direkt darunter. Ein bisschen Überlappung ist gut.</p>
+    <div style="display:grid;gap:10px"><button class="btn primary block" data-act="next">📷 Teil ${n + 1} fotografieren</button>
+    <button class="btn block" data-act="done">Fertig, auswerten</button></div></div>`);
+  sheet.querySelector('[data-act="close"]').onclick = () => { scanParts = null; closeSheet(true); };
+  sheet.querySelector('[data-act="next"]').onclick = () => { closeSheet(true); $('#camera').click(); };
+  sheet.querySelector('[data-act="done"]').onclick = async () => { const files = scanParts; scanParts = null; await closeSheet(true); await scanFiles(files); };
+}
+for (const id of ['camera', 'gallery']) {
+  $('#' + id).addEventListener('change', async (e) => {
+    const files = [...(e.target.files || [])]; e.target.value = ''; if (!files.length) return;
+    if (id === 'camera' && scanParts) { scanParts.push(files[0]); morePartsSheet(); return; }
+    await scanFiles(files);
+  });
+}
+// Mehrere Fotos eines Bons untereinander zu einem Bild zusammensetzen (zum Ablegen beim Beleg)
+async function stackPhotos(blobs) {
+  if (blobs.length < 2) return blobs[0] || null;
+  const bms = await Promise.all(blobs.map((b) => createImageBitmap(b)));
+  const w = Math.min(1100, Math.max(...bms.map((b) => b.width)));
+  let hs = bms.map((b) => Math.round(b.height * (w / b.width))), H = hs.reduce((a, b) => a + b, 0);
+  const k = Math.min(1, 14000 / H); hs = hs.map((h) => Math.round(h * k)); H = hs.reduce((a, b) => a + b, 0);
+  const cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = H;
+  const ctx = cv.getContext('2d'); let y = 0;
+  bms.forEach((b, i) => { ctx.drawImage(b, 0, y, cv.width, hs[i]); y += hs[i]; if (b.close) b.close(); });
+  return new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.78));
+}
+async function scanFiles(files) {
+  openSheet(`<div class="sbody"><div class="progress"><div class="spinner"></div><p id="scan-status" style="margin:14px 0 0;font-weight:600">Bereite Foto vor …</p><div class="bar"><div id="scan-bar"></div></div><p class="small muted">Die Texterkennung läuft komplett auf deinem iPhone. Bei langen Bons dauert das etwas.</p></div></div>`);
+  const setProgress = (msg, p) => { const s = $('#scan-status'); const b = $('#scan-bar'); if (s) s.textContent = msg; if (b) b.style.width = Math.round(p * 100) + '%'; };
+  let photo = null, parsed = { merchant: '', date: null, total: null, category: 'sonstiges' }, text = '', failed = false;
+  try {
+    const photos = [], strips = [];
+    for (let i = 0; i < files.length; i++) {
+      setProgress(files.length > 1 ? `Bereite Foto ${i + 1} von ${files.length} vor …` : 'Bereite Foto vor …', 0.05 + (i / files.length) * 0.2);
+      const prep = await prepareImage(files[i]); photos.push(prep.photo); strips.push(...prep.strips);
+    }
+    photo = await stackPhotos(photos);
+    text = await recognize(strips, setProgress); parsed = parseReceipt(text);
+  } catch (err) { console.error(err); failed = true; }
+  await closeSheet(true);
+  editReceipt({ id: uid(), merchant: parsed.merchant, date: parsed.date || toISODate(new Date()), total: parsed.total, category: parsed.category, note: '', image: photo, ocrText: text, createdAt: Date.now(), isNew: true },
+    failed ? 'Die Texterkennung hat nicht geklappt. Trag die Werte bitte von Hand ein.' : 'Automatisch erkannt. Bitte kurz prüfen, vor allem den Betrag.');
+}
+
+// --- Mehr: Abgleich, Sicherung, Datei ---
+function settingsSheet() {
+  const s = backupSettings.get();
+  const when = (iso) => (iso ? new Date(iso).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : 'noch nie');
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  openSheet(`${sheetHead('Einstellungen')}<div class="sbody">
+    <p class="small" style="margin:0 0 6px"><span class="status-dot ${s.syncError ? 'err' : s.syncAt ? 'ok' : ''}"></span>Abgleich mit Claude: <b>${esc(when(s.syncAt))}</b>${s.syncError ? `<br><span style="color:var(--warn)">${esc(s.syncError)}</span>` : ''}</p>
+    <p class="small" style="margin:0"><span class="status-dot ${s.lastError ? 'err' : s.lastAt ? 'ok' : ''}"></span>Letzte Sicherung: <b>${esc(when(s.lastAt))}</b>${s.lastError ? `<br><span style="color:var(--warn)">${esc(s.lastError)}</span>` : ''}</p>
+    <label class="field"><span>Server-Schlüssel</span><input id="b-token" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(s.token)}" placeholder="vom Server (BACKUP_TOKEN)"></label>
+    <label class="field"><span>Server-Adresse (leer = diese Seite)</span><input id="b-url" inputmode="url" autocomplete="off" value="${esc(s.url)}" placeholder="${esc(location.origin)}"></label>
+    <label class="check-row"><input id="b-auto" type="checkbox" ${s.auto ? 'checked' : ''}><span>Automatisch sichern, wenn Internet da ist</span></label>
+    <div class="btn-row"><button class="btn primary" id="b-now">Jetzt sichern</button><button class="btn" id="b-sync">Abgleichen</button><button class="btn" id="b-restore">Wiederherstellen</button></div>
+    <div class="lab">Backup als Datei</div>
+    <div class="btn-row"><button class="btn" id="f-export">Exportieren</button><button class="btn" id="f-import">Importieren</button></div>
+    <div class="lab">Über die App</div>
+    <p class="small" style="margin:0 0 6px">Alle Daten liegen auf diesem iPhone, die App läuft auch ohne Internet.</p>
+    <p class="small" style="margin:0"><span class="status-dot ${offline.shell ? 'ok' : ''}"></span>App offline verfügbar: <b>${offline.shell ? 'ja' : 'noch nicht'}</b><br><span class="status-dot ${offline.ocr ? 'ok' : ''}"></span>Texterkennung offline: <b>${offline.ocr ? 'ja' : 'wird geladen …'}</b></p>
+    ${standalone ? '' : '<p class="hint" style="margin-top:12px">Zum Installieren: in Safari auf <b>Teilen</b> tippen und <b>Zum Home-Bildschirm</b> wählen.</p>'}
+    <p class="muted small">Version <span id="app-version">…</span></p>
+  </div>`, () => refresh(MORE));
+  bindClose();
+  const save = () => backupSettings.set({ token: $('#b-token').value.trim(), url: $('#b-url').value.trim(), auto: $('#b-auto').checked });
+  ['b-token', 'b-url', 'b-auto'].forEach((id) => { $('#' + id).addEventListener('change', save); $('#' + id).addEventListener('input', save); });
+  $('#b-now').onclick = async (e) => {
+    save(); e.target.disabled = true; e.target.textContent = 'Sichere …';
+    try { const bytes = await uploadBackup(); toast(`Gesichert (${(bytes / 1024 / 1024).toFixed(1)} MB)`); } catch (err) { backupSettings.set({ lastError: err.message }); toast(navigator.onLine ? err.message : 'Kein Internet. Sicherung später.'); }
+    e.target.disabled = false; e.target.textContent = 'Jetzt sichern';
+  };
+  $('#b-sync').onclick = async (e) => { save(); e.target.disabled = true; await runSync(); const st = backupSettings.get(); toast(st.syncError ? st.syncError : 'Abgeglichen'); e.target.disabled = false; };
+  $('#b-restore').onclick = async () => {
+    save(); if (!confirm('Das letzte Backup vom Server laden? Gleiche Einträge werden überschrieben, neue bleiben erhalten.')) return;
+    try { const n = await restoreBackup(); imageUrls.forEach((u) => URL.revokeObjectURL(u)); imageUrls.clear(); await load(); refresh(); toast(`${n} Einträge wiederhergestellt`); } catch (err) { toast(err.message); }
+  };
+  $('#f-export').onclick = async () => {
+    const d = await exportAll(); const blob = new Blob([JSON.stringify(d)], { type: 'application/json' });
+    const name = `bummel-backup-${toISODate(new Date())}.json`; const file = new File([blob], name, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file], title: name }); return; } catch (err) { if (err.name === 'AbortError') return; } }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  $('#f-import').onclick = () => $('#import-file').click();
+  showVersion();
+}
+$('#import-file').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file) return;
+  try { const n = await importAll(JSON.parse(await file.text())); imageUrls.forEach((u) => URL.revokeObjectURL(u)); imageUrls.clear(); markDirty(); await load(); refresh(); toast(`${n} Einträge importiert`); } catch (err) { toast(err.message || 'Datei konnte nicht gelesen werden'); }
+});
+async function showVersion() {
+  const el = $('#app-version'); if (!el) return;
+  try { const keys = await caches.keys(); el.textContent = keys.find((k) => k.startsWith('lifestyle-'))?.replace('lifestyle-', '') || 'Entwicklung'; } catch { el.textContent = '–'; }
+}
+
+// ---------- Anlegen: Tipp auf eine freie Stelle ----------
+const cmp = $('#cmp'), scrim = $('#scrim');
+let cmpCtx = null, manual = {}, pendingFocus = false;
+const chip = (g, label, on, extra = '') => `<button type="button" class="chip ${extra}${on ? ' on' : ''}" data-g="${g}" data-v="${esc(label)}">${esc(label)}</button>`;
+function quickShop() {
+  const f = frequent().slice(0, 6).map((x) => [x.emoji || emoOf(x.title), x.title]);
+  const base = [['🥚', 'Eier'], ['🍌', 'Bananen'], ['🥛', 'Milch'], ['🍞', 'Brot'], ['🧈', 'Butter'], ['☕', 'Kaffee']];
+  const listed = new Set(onList().map((x) => norm(x.title)));
+  const out = [...f]; for (const b of base) if (out.length < 6 && !out.some((x) => norm(x[1]) === norm(b[1]))) out.push(b);
+  return out.filter((x) => !listed.has(norm(x[1])));
+}
+function cmpHtml(type, v) {
+  const x = '<button type="button" class="x" data-act="x">Abbrechen</button>';
+  if (type === 'todo') {
+    return `<div class="kk"><span>Neue Aufgabe</span>${x}</div><div class="fld"><span class="ck"></span><input id="fT" placeholder="Was steht an?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></div>
+      <div class="lab">Deadline, wenn es eine gibt</div>${dateField('fW', 'fDf', '')}
+      <div class="foot"><span class="dest" id="fD"></span><button type="button" class="go" id="fGo" disabled>Hinzufügen</button></div>`;
+  }
+  if (type === 'shop') {
+    const q = quickShop();
+    return `<div class="kk"><span>Auf die Liste</span>${x}</div><div class="fld"><span class="em" id="fE">🛒</span><input id="fT" placeholder="Was fehlt?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></div>
+      ${qtyField('', 'Stück')}
+      ${q.length ? `<div class="lab">Oft gekauft · antippen setzt es sofort drauf</div><div class="chips">${q.map(([e, t]) => chip('quick', e + ' ' + t, false, 'q')).join('')}</div>` : ''}
+      <div class="foot"><span class="dest">Landet auf der Liste. Rezept-Links gehen auch.</span><button type="button" class="go" id="fGo" disabled>Hinzufügen</button></div>`;
+  }
+  if (type === 'money') {
+    return `<div class="kk"><span>Neue Ausgabe</span>${x}</div><div class="amt"><input id="fA" inputmode="decimal" placeholder="0,00" enterkeyhint="next" autocomplete="off"><span>€</span></div><div class="sep"></div>
+      <div class="fld"><input id="fT" placeholder="Wofür? Zum Beispiel Bäcker" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></div>
+      <div class="chips">${chip('scan', '📷 Beleg scannen', false, 'scan')}${CATEGORIES.map((c) => chip('cat', c.name, false)).join('')}</div>
+      <div class="foot"><span class="dest" id="fD">Zählt zum ${esc(monthLabel(monthKey(new Date())).split(' ')[0])}</span><button type="button" class="go" id="fGo" disabled>Eintragen</button></div>`;
+  }
+  return `<div class="kk"><span>⚡ Gedankenblitz</span>${x}</div><div class="fld"><textarea id="fT" rows="3" placeholder="Was geht dir durch den Kopf?" autocomplete="off" autocapitalize="sentences"></textarea></div>
+    <div class="foot"><span class="dest">Landet links bei den Gedankenblitzen</span><button type="button" class="go" id="fGo" disabled>Festhalten</button></div>`;
+}
+const q = (s) => cmp.querySelector(s);
+const chosen = (g) => { const b = q(`.chip.on[data-g="${g}"]`); return b ? b.dataset.v : null; };
+function pick(g, val, auto) {
+  cmp.querySelectorAll(`.chip[data-g="${g}"]`).forEach((b) => {
+    const on = b.dataset.v === val;
+    if (on && !b.classList.contains('on') && auto) { b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse'); }
+    b.classList.toggle('on', on);
+  });
+}
+const amount = () => { const el = q('#fA'); if (!el) return 0; const c = parseEuroInput(el.value); return c || 0; };
+const catByName = (n) => CATEGORIES.find((c) => c.name === n);
+function cmpRefresh() {
+  if (!cmpCtx) return;
+  const t = (q('#fT') || {}).value || ''; const go = q('#fGo');
+  if (cmpCtx.type === 'todo') {
+    const wi = q('#fW');
+    if (!manual.when) { const hit = WHEN.find((w) => w[1].test(t)); const nv = hit ? whenDue(hit[0]) : ''; if (wi.value !== nv) { wi.value = nv; if (nv) { const f = q('#fDf'); f.classList.remove('pulse'); void f.offsetWidth; f.classList.add('pulse'); } } }
+    syncDateField(q('#fDf'));
+    q('#fD').textContent = wi.value ? `Mit Fahne „${dueFlag(wi.value)}“` : 'Bekommt einen freien Platz'; go.disabled = !t.trim();
+  }
+  if (cmpCtx.type === 'shop') {
+    const e = t.trim() ? emoOf(t) : '🛒', el = q('#fE');
+    if (el.textContent !== e) { el.textContent = e; el.classList.add('bump'); setTimeout(() => el.classList.remove('bump'), 250); }
+    const link = isLink(t); cmp.classList.toggle('link', link);
+    const dEl = q('.foot .dest'); if (dEl) dEl.textContent = link ? 'Rezept-Link: Zutaten werden erkannt' : 'Landet auf der Liste. Rezept-Links gehen auch.';
+    if (go) go.textContent = link ? 'Zutaten holen' : 'Hinzufügen';
+    if (!manual.qty && !link) { const m = t.match(/^\s*(\d+(?:[.,]\d+)?)\s*(stück|stk\.?|x|kg|g|ml|l)?\s+\S/i); const s = m ? splitQty(m[1] + (m[2] ? ' ' + m[2] : '')) : { n: '', u: 'Stück' }; q('#qN').value = s.n; setUnit(cmp, s.u); }
+    go.disabled = !t.trim();
+  }
+  if (cmpCtx.type === 'money') {
+    if (!manual.cat) { const id = guessCategory(t); if (id !== 'sonstiges') pick('cat', CAT[id].name, true); }
+    go.disabled = !(amount() > 0);
+  }
+  if (cmpCtx.type === 'blitz') go.disabled = !t.trim();
+  placeCmp();
+}
+const TYPE = { [TODO]: 'todo', [SHOP]: 'shop', [MONEY]: 'money', [PROJ]: 'blitz' };
+function openCmp(si, v, at) {
+  const type = TYPE[si]; if (!type || cmpCtx) return false;
+  cmpCtx = { si, v, type, at }; manual = {};
+  cmp.innerHTML = cmpHtml(type, v);
+  weg.pause(true); scrim.classList.add('on');
+  cmp.style.transition = 'none'; cmp.classList.remove('show'); placeCmp(true); void cmp.offsetWidth; cmp.style.transition = '';
+  cmpRefresh();
+  requestAnimationFrame(() => cmp.classList.add('show'));
+  return true;
+}
+function focusFirst() { const el = q('#fA') || q('#fT'); if (el) { try { el.focus({ preventScroll: true }); } catch { el.focus(); } } }
+function closeCmp() {
+  if (!cmpCtx) return;
+  const a = document.activeElement; if (a && a.blur) a.blur();
+  cmp.classList.remove('show'); scrim.classList.remove('on'); cmpCtx = null; pendingFocus = false;
+  if (!sheet.classList.contains('on')) weg.pause(false);
+  setTimeout(() => { if (!cmpCtx) cmp.innerHTML = ''; }, 350);
+}
+function placeCmp(first) {
+  if (!cmpCtx) return;
+  const vv = window.visualViewport, vh = vv ? vv.height : innerHeight, ot = vv ? vv.offsetTop : 0, ch = cmp.offsetHeight, w = cmp.offsetWidth;
+  const { x, y } = cmpCtx.at;
+  // Immer mittig und ganz sichtbar, auch wenn die Tastatur offen ist; die Animation startet trotzdem am Finger.
+  const L = Math.round((innerWidth - w) / 2);
+  const T = Math.round(Math.max(ot + 12, ot + (vh - ch) / 2 - (vv && vh < innerHeight * 0.8 ? 0 : 30)));
+  cmp.style.left = L + 'px'; cmp.style.top = T + 'px';
+  if (first) { cmp.style.setProperty('--ox', (x - L) + 'px'); cmp.style.setProperty('--oy', (y - T) + 'px'); }
+}
+if (window.visualViewport) { visualViewport.addEventListener('resize', () => placeCmp()); visualViewport.addEventListener('scroll', () => placeCmp()); }
+cmp.addEventListener('change', (e) => { if (e.target.id === 'fW') { manual.when = true; cmpRefresh(); } if (e.target.id === 'qU') manual.qty = true; });
+cmp.addEventListener('input', (e) => { if (e.target.id === 'fW') manual.when = true; if (e.target.id === 'qN') { manual.qty = true; e.target.value = e.target.value.replace(/[^\d,.]/g, ''); } if (e.target.id === 'fA') e.target.value = e.target.value.replace(/[^\d,.]/g, ''); cmpRefresh(); });
+cmp.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeCmp(); return; }
+  if (e.key === 'Enter' && !(e.target.tagName === 'TEXTAREA' && e.shiftKey)) {
+    e.preventDefault();
+    if (e.target.id === 'fA') { q('#fT').focus(); return; }
+    const go = q('#fGo'); if (go && !go.disabled) submitCmp();
+  }
+});
+cmp.addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.act === 'x') { closeCmp(); return; }
+  if (b.dataset.act === 'clr') { manual.when = true; q('#fW').value = ''; cmpRefresh(); return; }
+  if (b.id === 'fGo') { submitCmp(); return; }
+  const g = b.dataset.g; if (!g) return;
+  if (g === 'quick') { const [em, ...rest] = b.dataset.v.split(' '); quickAdd(em, rest.join(' '), b); return; }
+  if (g === 'scan') { closeCmp(); chooseSource(); return; }
+  manual[g] = true; const was = b.classList.contains('on'); pick(g, (was && g !== 'when') ? null : b.dataset.v); cmpRefresh();
+  const f = q('#fT'); if (f) try { f.focus({ preventScroll: true }); } catch { /* egal */ }
+});
+scrim.addEventListener('pointerup', (e) => { e.stopPropagation(); closeCmp(); });
+async function quickAdd(em, t, btn) {
+  const r = btn.getBoundingClientRect();
+  btn.style.transition = 'opacity .3s, transform .3s'; btn.style.opacity = '0'; btn.style.transform = 'scale(.6)'; setTimeout(() => btn.remove(), 300);
+  await addShop({ title: t, emoji: em }, r);
+}
+async function submitCmp() {
+  if (!cmpCtx) return;
+  const { type, v } = cmpCtx; const src = q('.fld') || q('.amt') || cmp; const rect = src.getBoundingClientRect();
+  if (type === 'todo') {
+    let t = q('#fT').value.trim(); const due = q('#fW').value || null;
+    const hit = WHEN.find((x) => x[1].test(t)); if (hit && due && due === whenDue(hit[0])) t = t.replace(hit[1], '').replace(/\s{2,}/g, ' ').trim() || t;
+    const id = uid(); closeCmp();
+    await db.put('todos', { id, title: cap(t), done: false, due, note: '', createdAt: Date.now() });
+    await changed(TODO, { [id]: rect });
+    setTimeout(() => { const t = data.todos.find((x) => x.id === id); const nv = t && t.pos ? t.pos.v : 0; if (nv !== v) toast(`Liegt ${nv < 0 ? 'links' : nv > 0 ? 'rechts' : 'in der Mitte'}`, { action: 'Zeigen', onAction: () => weg.setView(nv) }); }, 300);
+  } else if (type === 'shop') {
+    let t = q('#fT').value.trim();
+    if (isLink(t)) { closeCmp(); recipeFromLink(t); return; }
+    const qty = joinQty(q('#qN').value, unitOf(cmp));
+    const m = t.match(/^\s*(\d+(?:[.,]\d+)?)\s*(stück|stk\.?|x|kg|g|ml|l)?\s+/i); if (m && !manual.qty) t = t.slice(m[0].length) || t;
+    closeCmp(); await addShop({ title: cap(t), qty: qty || '' }, rect);
+  } else if (type === 'money') {
+    const a = amount(); const t = q('#fT').value.trim(); const c = catByName(chosen('cat'));
+    const cat = c ? c.id : guessCategory(t);
+    const r2 = q('.amt').getBoundingClientRect(); closeCmp();
+    state.month = monthKey(new Date());
+    await db.put('receipts', { id: uid(), merchant: cap(t), date: today(), total: a, category: cat, note: '', image: null, ocrText: '', createdAt: Date.now() });
+    flyAmount(a, t, r2);
+  } else {
+    const t = q('#fT').value.trim(); const id = uid(); closeCmp();
+    await db.put('ideas', { id, kind: 'blitz', title: '', idea: t, log: [{ at: Date.now(), by: 'ich', text: 'Gedankenblitz notiert' }], createdAt: Date.now() });
+    await changed(PROJ, { [id]: rect });
+    if (v !== -1) setTimeout(() => toast('Bei den Gedankenblitzen abgelegt', { action: 'Zeigen', onAction: () => weg.setView(-1) }), 250);
+  }
+}
+// Finanzen: der Betrag fliegt in die Monatssumme
+function flyAmount(a, t, rect) {
+  const el = document.createElement('div'); el.className = 'wc';
+  el.style.cssText = 'opacity:1;z-index:2600;visibility:visible;width:auto;padding:10px 14px;transition:transform .8s cubic-bezier(.5,0,.2,1),opacity .8s';
+  el.innerHTML = `<div class="t">− ${esc(euro(a))}</div>${t ? `<div class="s">${esc(t)}</div>` : ''}`;
+  $('#hud').appendChild(el);
+  const w = el.offsetWidth, h = el.offsetHeight;
+  el.style.transform = `translate3d(${rect.left + rect.width / 2 - w / 2}px,${rect.top + rect.height / 2 - h / 2}px,0)`;
+  const tr = weg.view === 0 ? weg.cardRect(MONEY, 'total') : null;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    let x2, y2, sc = 0.45;
+    if (tr) { x2 = tr.left + tr.width / 2; y2 = tr.top + tr.height / 2; } else { x2 = weg.view > 0 ? -120 : innerWidth + 120; y2 = innerHeight * 0.4; sc = 0.8; }
+    el.style.transform = `translate3d(${x2 - w / 2}px,${y2 - h / 2}px,0) scale(${sc})`; el.style.opacity = tr ? '0' : '.2';
+  }));
+  setTimeout(async () => {
+    el.remove(); await changed(MONEY);
+    const tel = weg.cardEl(MONEY, 'total'); if (tel) { tel.classList.add('fresh'); setTimeout(() => tel.classList.remove('fresh'), 1600); }
+    if (!tr) toast(`${euro(a)} eingetragen`, { action: 'Zeigen', onAction: () => weg.setView(0) });
+  }, tr ? 820 : 500);
+}
+function onEmptyTap({ si, v, x, y }) {
+  if (si === MORE) return;
+  if (openCmp(si, v, { x, y })) { pendingFocus = true; focusFirst(); }
+}
+// iOS öffnet die Tastatur nur, wenn der Fokus direkt im Berührungs-Ereignis gesetzt wird
+const doFocus = () => { if (pendingFocus) { pendingFocus = false; focusFirst(); } };
+document.addEventListener('touchend', doFocus, true);
+document.addEventListener('pointerup', doFocus, true);
+
+// iOS: keine Browser-Gesten, kein Nachfedern der Seite (außer in Blättern und Eingaben)
+for (const ev of ['touchstart', 'touchmove']) {
+  document.addEventListener(ev, (e) => {
+    if (e.touches && e.touches.length > 1) return;
+    const t = e.target;
+    if (t.closest && t.closest('.sheet .sbody, .cmp, input, textarea, select')) return;
+    if (ev === 'touchmove' || !(t.closest && t.closest('button, label, .sheet'))) e.preventDefault();
+  }, { passive: false });
+}
+
+// ---------- Abgleich ----------
+let syncTimer = null;
+function scheduleSync(delay = 1500) { clearTimeout(syncTimer); syncTimer = setTimeout(runSync, delay); }
+async function runSync() {
+  try {
+    const r = await sync();
+    backupSettings.set({ syncAt: r.skipped ? backupSettings.get().syncAt : new Date().toISOString(), syncError: null });
+    if (r.received) { await load(); if (!sheet.classList.contains('on') && !cmpCtx) refresh(); else refresh([MORE]); }
+  } catch (e) { backupSettings.set({ syncError: e.message }); }
+}
+
+// ---------- Offline & Updates ----------
+const offline = { shell: false, ocr: false, version: null };
+function askOfflineStatus() { offline.askedAt = Date.now(); if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage({ type: 'offline-status' }); }
+const hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (!e.data || e.data.type !== 'offline-status') return;
+    Object.assign(offline, e.data);
+    if (offline.shell && offline.ocr && ls.get('lifestyle.offlineReady') !== e.data.version) { toast('App ist jetzt offline verfügbar'); ls.set('lifestyle.offlineReady', e.data.version); }
+    refresh([MORE]);
+  });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.onLine) reg.update().catch(() => {}); });
+  }).catch((e) => console.warn('Service Worker nicht registriert', e));
+  navigator.serviceWorker.ready.then(() => {
+    if (navigator.serviceWorker.controller) askOfflineStatus();
+    else navigator.serviceWorker.addEventListener('controllerchange', askOfflineStatus, { once: true });
+  });
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloading || !hadController) return; reloading = true;
+    toast('App wurde aktualisiert'); setTimeout(() => location.reload(), 600);
+  });
+}
+window.addEventListener('online', () => { autoBackup(); scheduleSync(200); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') autoBackup();
+  else { scheduleSync(300); if (weg) refresh([TODO, MONEY]); }
+});
+
+// ---------- Start ----------
+async function start() {
+  requestPersistence();
+  initRewardAudio();
+  await load();
+  const startSt = Math.max(0, Math.min(SECT.length - 1, Number(ls.get('lifestyle.station')) || 0));
+  try {
+    if (!window.THREE) throw new Error('3D-Bibliothek fehlt');
+    weg = createWeg({
+      sections: SECT, host: document.body, hud: $('#hud'), start: startSt,
+      head, tip, onCardTap, onEmptyTap, onMore, onReorder, onPlace,
+      onStation: (i) => ls.set('lifestyle.station', String(i)),
+    });
+  } catch (e) {
+    console.error(e);
+    document.body.insertAdjacentHTML('beforeend', `<div class="nogl"><div><h2 style="font-family:var(--serif);font-weight:500">Der Weg kann nicht angezeigt werden</h2><p>${esc(e.message)}. Bitte Safari aktualisieren oder die App neu öffnen.</p></div></div>`);
+    return;
+  }
+  refresh(undefined, null, true);
+  setTimeout(() => $('#boot').classList.add('off'), 300);
+  if (!ls.get('lifestyle.weg.hint')) { setTimeout(() => toast('Wisch hoch zum Gehen, seitlich zum Umschauen', { ms: 4200 }), 1200); ls.set('lifestyle.weg.hint', '1'); }
+  setTimeout(() => autoBackup(), 3000);
+  scheduleSync(500);
+  // Mitternacht: Heute/Demnächst neu einsortieren
+  setInterval(() => { if (!sheet.classList.contains('on') && !cmpCtx) refresh([TODO]); }, 5 * 60 * 1000);
+}
+start();
