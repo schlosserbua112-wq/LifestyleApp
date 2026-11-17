@@ -10,6 +10,9 @@ function save(s) {
   try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* ignorieren */ }
 }
 
+// 401: Schlüssel passt nicht; der Server sagt, wie viele Zeichen er erwartet
+async function keyError(res) { try { const j = await res.json(); return 'Server-Schlüssel passt nicht.' + (j.hint ? ' ' + j.hint : ''); } catch { return 'Server-Schlüssel passt nicht.'; } }
+
 export const backupSettings = {
   get: () => ({ url: '', token: '', auto: true, lastAt: null, lastError: null, dirty: false, ...load() }),
   set: (patch) => { const s = { ...backupSettings.get(), ...patch }; save(s); return s; },
@@ -34,7 +37,7 @@ export async function uploadBackup() {
     body,
     cache: 'no-store',
   });
-  if (!res.ok) throw new Error(res.status === 401 ? 'Backup-Schlüssel ist falsch.' : `Server antwortet mit ${res.status}.`);
+  if (!res.ok) throw new Error(res.status === 401 ? await keyError(res) : `Server antwortet mit ${res.status}.`);
   backupSettings.set({ lastAt: new Date().toISOString(), lastError: null, dirty: false });
   return body.length;
 }
@@ -47,7 +50,7 @@ export async function restoreBackup() {
     cache: 'no-store',
   });
   if (res.status === 404) throw new Error('Auf dem Server liegt noch kein Backup.');
-  if (!res.ok) throw new Error(res.status === 401 ? 'Backup-Schlüssel ist falsch.' : `Server antwortet mit ${res.status}.`);
+  if (!res.ok) throw new Error(res.status === 401 ? await keyError(res) : `Server antwortet mit ${res.status}.`);
   return importAll(await res.json());
 }
 

@@ -8,6 +8,9 @@ const getRev = () => { try { return Number(localStorage.getItem(REV_KEY)) || 0; 
 const setRev = (r) => { try { localStorage.setItem(REV_KEY, String(r)); } catch { /* egal */ } };
 
 // Verlauf zweier Stände einer Idee zusammenführen (nichts geht verloren).
+// 401: Schlüssel passt nicht; der Server sagt, wie viele Zeichen er erwartet
+async function keyError(res) { try { const j = await res.json(); return 'Server-Schlüssel passt nicht.' + (j.hint ? ' ' + j.hint : ''); } catch { return 'Server-Schlüssel passt nicht.'; } }
+
 export function mergeLog(a = [], b = []) {
   const seen = new Map();
   for (const e of [...a, ...b]) seen.set(`${e.at}|${e.by}|${e.text}`, e);
@@ -41,7 +44,7 @@ async function doSync() {
     body: JSON.stringify({ since: getRev(), changes }),
     cache: 'no-store',
   });
-  if (!res.ok) throw new Error(res.status === 401 ? 'Backup-Schlüssel ist falsch.' : `Abgleich: Server antwortet mit ${res.status}.`);
+  if (!res.ok) throw new Error(res.status === 401 ? await keyError(res) : `Abgleich: Server antwortet mit ${res.status}.`);
   const data = await res.json();
 
   // Gesendete Änderungen sind angekommen (außer sie wurden inzwischen erneut geändert).
