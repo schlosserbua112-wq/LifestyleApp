@@ -149,6 +149,7 @@ function moneyItems() {
   if (prev.total > 0 && cur.total > 0) { const p = Math.round((cur.total - prev.total) / prev.total * 100); delta = `${Math.abs(p)} % ${p > 0 ? 'mehr' : 'weniger'} als ${monthLabel(shiftMonth(m, -1)).split(' ')[0]}`; }
   items.push({ key: 'total', v: 0, html: `<div class="k">Ausgegeben im ${esc(mName)}</div><div class="big">${esc(euro(cur.total))}</div><div class="s">${esc(delta)}</div>` });
   const last = [...cur.rs].sort((a, b) => (a.date === b.date ? (b.createdAt || 0) - (a.createdAt || 0) : a.date < b.date ? 1 : -1)).slice(0, 3);
+  items.push({ key: 'scan', v: 0, cls: 'scan', html: `<div class="t">📷 Beleg scannen</div><div class="s">Betrag wird erkannt</div>` });
   if (last.length) items.push({ key: 'last', v: 0, html: `<div class="k">Zuletzt</div>${last.map((r) => `<div class="s" style="margin-top:6px;color:var(--ink)">${esc(r.merchant || CAT[r.category]?.name || 'Ausgabe')} · <b>${esc(euro(r.total))}</b></div>`).join('')}` });
   if (data.receipts.length) items.push({ key: 'search', v: 0, html: `<div class="t">🔍 Belege durchsuchen</div><div class="s">${data.receipts.length} insgesamt</div>` });
   // Rechts: das Jahr
@@ -242,6 +243,7 @@ async function onCardTap(h) {
       refresh(MONEY); toast(`${monthLabel(state.month)} gewählt`, { action: 'Zeigen', onAction: () => weg.setView(0) });
       return;
     }
+    if (key === 'scan') return chooseSource();
     if (key === 'search' || key === 'last' || key === 'total') return receiptsSheet();
     if (key === 'ymax') return;
   }
@@ -368,14 +370,11 @@ function whenDue(w) {
   if (w === 'Nächste Woche') { const wd = d.getDay(); d.setDate(d.getDate() + (((8 - wd) % 7) || 7)); return toISODate(d); }
   return null;
 }
-function whenOf(due) { if (!due) return 'Keine'; for (const [w] of WHEN) if (whenDue(w) === due) return w; return null; }
 function todoSheet(t) {
   let due = t.due || null;
-  const chips = () => [['Keine'], ...WHEN].map(([w]) => `<button type="button" class="chip${whenOf(due) === w ? ' on' : ''}" data-w="${w}">${w}</button>`).join('');
   openSheet(`${sheetHead('')}<div class="sbody">
       <textarea class="ttl" id="t-title" rows="2">${esc(t.title)}</textarea>
-      <div class="lab">Deadline</div><div class="chips" id="t-when">${chips()}</div>
-      <label class="field"><span>Oder ein Datum</span><input id="t-due" type="date" value="${esc(due || '')}"></label>
+      <div class="field"><span>Deadline</span><div class="datef${due ? ' set' : ''}" id="t-df"><input id="t-due" type="date" value="${esc(due || '')}"><button type="button" class="clr" id="t-clr" aria-label="Deadline entfernen">×</button></div></div>
       <label class="field"><span>Notiz</span><textarea id="t-note" rows="3" placeholder="Optional">${esc(t.note || '')}</textarea></label>
       <div class="btn-row"><button class="btn primary" data-act="done">Erledigt</button><button class="btn danger" data-act="delete">Löschen</button></div>
     </div>`, async () => {
@@ -387,9 +386,8 @@ function todoSheet(t) {
     }
   });
   bindClose();
-  const setDue = (d) => { due = d; $('#t-when').innerHTML = chips(); $('#t-due').value = due || ''; bindChips(); };
-  const bindChips = () => sheet.querySelectorAll('[data-w]').forEach((b) => b.addEventListener('click', () => setDue(whenDue(b.dataset.w))));
-  bindChips();
+  const setDue = (d) => { due = d; $('#t-due').value = due || ''; $('#t-df').classList.toggle('set', !!due); };
+  $('#t-clr').addEventListener('click', () => setDue(null));
   $('#t-due').addEventListener('change', (e) => setDue(e.target.value || null));
   sheet.querySelector('[data-act="done"]').onclick = async () => { await closeSheet(); completeTodo(t); };
   sheet.querySelector('[data-act="delete"]').onclick = async () => {
@@ -638,7 +636,7 @@ function cmpHtml(type, v) {
   const x = '<button type="button" class="x" data-act="x">Abbrechen</button>';
   if (type === 'todo') {
     return `<div class="kk"><span>Neue Aufgabe</span>${x}</div><div class="fld"><span class="ck"></span><input id="fT" placeholder="Was steht an?" enterkeyhint="done" autocomplete="off" autocapitalize="sentences"></div>
-      <div class="lab">Deadline, wenn es eine gibt</div><div class="chips">${WHEN.map((w) => chip('when', w[0], false)).join('')}</div>
+      <div class="lab">Deadline, wenn es eine gibt</div><div class="datef" id="fDf"><input id="fW" type="date"><button type="button" class="clr" data-act="clr" aria-label="Deadline entfernen">×</button></div>
       <div class="foot"><span class="dest" id="fD"></span><button type="button" class="go" id="fGo" disabled>Hinzufügen</button></div>`;
   }
   if (type === 'shop') {
@@ -672,9 +670,10 @@ function cmpRefresh() {
   if (!cmpCtx) return;
   const t = (q('#fT') || {}).value || ''; const go = q('#fGo');
   if (cmpCtx.type === 'todo') {
-    if (!manual.when) { const hit = WHEN.find((w) => w[1].test(t)); pick('when', hit ? hit[0] : null, !!hit); }
-    const w = chosen('when');
-    q('#fD').textContent = w ? `Mit Fahne „${dueFlag(whenDue(w))}“` : 'Bekommt einen freien Platz'; go.disabled = !t.trim();
+    const wi = q('#fW');
+    if (!manual.when) { const hit = WHEN.find((w) => w[1].test(t)); const nv = hit ? whenDue(hit[0]) : ''; if (wi.value !== nv) { wi.value = nv; if (nv) { const f = q('#fDf'); f.classList.remove('pulse'); void f.offsetWidth; f.classList.add('pulse'); } } }
+    q('#fDf').classList.toggle('set', !!wi.value);
+    q('#fD').textContent = wi.value ? `Mit Fahne „${dueFlag(wi.value)}“` : 'Bekommt einen freien Platz'; go.disabled = !t.trim();
   }
   if (cmpCtx.type === 'shop') {
     const e = t.trim() ? emoOf(t) : '🛒', el = q('#fE');
@@ -712,13 +711,15 @@ function placeCmp(first) {
   if (!cmpCtx) return;
   const vv = window.visualViewport, vh = vv ? vv.height : innerHeight, ot = vv ? vv.offsetTop : 0, ch = cmp.offsetHeight, w = cmp.offsetWidth;
   const { x, y } = cmpCtx.at;
-  const L = Math.max(16, Math.min(innerWidth - w - 16, x - w / 2));
-  const T = Math.max(ot + 56, Math.min(ot + vh - ch - 12, y - 38));
+  // Immer mittig und ganz sichtbar, auch wenn die Tastatur offen ist; die Animation startet trotzdem am Finger.
+  const L = Math.round((innerWidth - w) / 2);
+  const T = Math.round(Math.max(ot + 12, ot + (vh - ch) / 2 - (vv && vh < innerHeight * 0.8 ? 0 : 30)));
   cmp.style.left = L + 'px'; cmp.style.top = T + 'px';
   if (first) { cmp.style.setProperty('--ox', (x - L) + 'px'); cmp.style.setProperty('--oy', (y - T) + 'px'); }
 }
 if (window.visualViewport) { visualViewport.addEventListener('resize', () => placeCmp()); visualViewport.addEventListener('scroll', () => placeCmp()); }
-cmp.addEventListener('input', (e) => { if (e.target.id === 'fA') e.target.value = e.target.value.replace(/[^\d,.]/g, ''); cmpRefresh(); });
+cmp.addEventListener('change', (e) => { if (e.target.id === 'fW') { manual.when = true; cmpRefresh(); } });
+cmp.addEventListener('input', (e) => { if (e.target.id === 'fW') manual.when = true; if (e.target.id === 'fA') e.target.value = e.target.value.replace(/[^\d,.]/g, ''); cmpRefresh(); });
 cmp.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeCmp(); return; }
   if (e.key === 'Enter' && !(e.target.tagName === 'TEXTAREA' && e.shiftKey)) {
@@ -730,6 +731,7 @@ cmp.addEventListener('keydown', (e) => {
 cmp.addEventListener('click', (e) => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.act === 'x') { closeCmp(); return; }
+  if (b.dataset.act === 'clr') { manual.when = true; q('#fW').value = ''; cmpRefresh(); return; }
   if (b.id === 'fGo') { submitCmp(); return; }
   const g = b.dataset.g; if (!g) return;
   if (g === 'quick') { const [em, ...rest] = b.dataset.v.split(' '); quickAdd(em, rest.join(' '), b); return; }
@@ -747,9 +749,9 @@ async function submitCmp() {
   if (!cmpCtx) return;
   const { type, v } = cmpCtx; const src = q('.fld') || q('.amt') || cmp; const rect = src.getBoundingClientRect();
   if (type === 'todo') {
-    let t = q('#fT').value.trim(); const w = chosen('when');
-    const hit = WHEN.find((x) => x[1].test(t)); if (hit && w === hit[0]) t = t.replace(hit[1], '').replace(/\s{2,}/g, ' ').trim() || t;
-    const due = w ? whenDue(w) : null, id = uid(); closeCmp();
+    let t = q('#fT').value.trim(); const due = q('#fW').value || null;
+    const hit = WHEN.find((x) => x[1].test(t)); if (hit && due && due === whenDue(hit[0])) t = t.replace(hit[1], '').replace(/\s{2,}/g, ' ').trim() || t;
+    const id = uid(); closeCmp();
     await db.put('todos', { id, title: cap(t), done: false, due, note: '', createdAt: Date.now() });
     await changed(TODO, { [id]: rect });
     setTimeout(() => { const t = data.todos.find((x) => x.id === id); const nv = t && t.pos ? t.pos.v : 0; if (nv !== v) toast(`Liegt ${nv < 0 ? 'links' : nv > 0 ? 'rechts' : 'in der Mitte'}`, { action: 'Zeigen', onAction: () => weg.setView(nv) }); }, 300);
