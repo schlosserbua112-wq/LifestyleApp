@@ -7,6 +7,7 @@ import { join, normalize, extname } from 'node:path';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { Store } from './store.js';
 import { handleMcp } from './mcp.js';
+import { recipeFromUrl } from './recipe.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = process.env.PUBLIC_DIR || new URL('../public', import.meta.url).pathname;
@@ -85,6 +86,12 @@ async function handleApi(req, res, path) {
     try { parsed = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'Kein gültiges JSON.' }); }
     const since = Number(parsed.since) || 0;
     return json(res, 200, await store.sync(since, Array.isArray(parsed.changes) ? parsed.changes : []));
+  }
+  // Rezept-Link: Zutaten erkennen, die App zeigt sie zur Auswahl an
+  if (path === '/api/recipe' && req.method === 'POST') {
+    let parsed;
+    try { parsed = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: 'Kein gültiges JSON.' }); }
+    try { return json(res, 200, await recipeFromUrl(parsed.url)); } catch (e) { return json(res, 422, { error: e.message || 'Rezept nicht lesbar.' }); }
   }
   if (path === '/api/backup/latest' && req.method === 'GET') {
     const all = await listBackups();
