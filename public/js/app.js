@@ -134,9 +134,10 @@ function splitQty(q) {
 }
 function joinQty(n, u) { n = String(n || '').trim(); if (!n) return ''; return u && u !== 'Stück' ? `${n} ${u}` : n; }
 const qtyLabel = (q) => { const s = splitQty(q); return s.n && s.u === 'Stück' && !s.raw ? `${s.n} Stück` : (q || ''); };
-const qtyField = (n, u) => `<div class="qtyf"><input class="qn" id="qN" inputmode="decimal" placeholder="Menge" value="${esc(n || '')}" autocomplete="off" aria-label="Menge"><div class="units" role="radiogroup" aria-label="Einheit">${UNITS.map((x) => `<button type="button" class="${x === (u || 'Stück') ? 'on' : ''}" data-unit="${x}">${x}</button>`).join('')}</div></div>`;
-const unitOf = (root) => { const b = root.querySelector('.units .on'); return b ? b.dataset.unit : 'Stück'; };
-function setUnit(root, u) { root.querySelectorAll('.units button').forEach((b) => b.classList.toggle('on', b.dataset.unit === u)); }
+const qtyField = (n, u) => `<div class="qtyf"><input class="qn" id="qN" inputmode="decimal" placeholder="Menge" value="${esc(n || '')}" autocomplete="off" aria-label="Menge"><label class="unitsel"><select id="qU" aria-label="Einheit">${UNITS.map((x) => `<option value="${x}"${x === (u || 'Stück') ? ' selected' : ''}>${UNIT_NAME[x]}</option>`).join('')}</select><svg viewBox="0 0 12 8" aria-hidden="true"><path d="M1 1.5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></label></div>`;
+const UNIT_NAME = { 'Stück': 'Stück', g: 'Gramm (g)', kg: 'Kilo (kg)', ml: 'Milliliter (ml)', l: 'Liter (l)' };
+const unitOf = (root) => { const sel = root.querySelector('#qU'); return sel ? sel.value : 'Stück'; };
+function setUnit(root, u) { const sel = root.querySelector('#qU'); if (sel) sel.value = u; }
 const shopCard = (x) => `<div class="row">${CK}<div><div class="t">${esc(x.emoji || emoOf(x.title))} ${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([qtyLabel(x.qty), x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
 function shopItems() {
   // Wie bei Aufgaben: jedes Ding bekommt einen freien Platz (Mitte, dann rechts) und bleibt dort, bis man es verschiebt.
@@ -510,7 +511,6 @@ function shopSheet(x) {
     if (title !== cur.title || q !== (cur.qty || '') || note !== (cur.note || '')) { await db.put('shopping', { ...cur, title, qty: q, note, emoji: title !== cur.title ? emoOf(title) : cur.emoji }); await changed(SHOP); }
   });
   bindClose();
-  sheet.querySelectorAll('[data-unit]').forEach((b) => b.addEventListener('click', () => setUnit(sheet, b.dataset.unit)));
   sheet.querySelector('[data-act="buy"]').onclick = async () => { await closeSheet(); buyShop(x); };
   sheet.querySelector('[data-act="delete"]').onclick = async () => {
     await closeSheet(true);
@@ -820,7 +820,7 @@ function placeCmp(first) {
   if (first) { cmp.style.setProperty('--ox', (x - L) + 'px'); cmp.style.setProperty('--oy', (y - T) + 'px'); }
 }
 if (window.visualViewport) { visualViewport.addEventListener('resize', () => placeCmp()); visualViewport.addEventListener('scroll', () => placeCmp()); }
-cmp.addEventListener('change', (e) => { if (e.target.id === 'fW') { manual.when = true; cmpRefresh(); } });
+cmp.addEventListener('change', (e) => { if (e.target.id === 'fW') { manual.when = true; cmpRefresh(); } if (e.target.id === 'qU') manual.qty = true; });
 cmp.addEventListener('input', (e) => { if (e.target.id === 'fW') manual.when = true; if (e.target.id === 'qN') { manual.qty = true; e.target.value = e.target.value.replace(/[^\d,.]/g, ''); } if (e.target.id === 'fA') e.target.value = e.target.value.replace(/[^\d,.]/g, ''); cmpRefresh(); });
 cmp.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeCmp(); return; }
@@ -836,7 +836,6 @@ cmp.addEventListener('click', (e) => {
   if (b.dataset.act === 'clr') { manual.when = true; q('#fW').value = ''; cmpRefresh(); return; }
   if (b.id === 'fGo') { submitCmp(); return; }
   const g = b.dataset.g; if (!g) return;
-  if (b.dataset.unit) { manual.qty = true; setUnit(cmp, b.dataset.unit); const n = q('#qN'); if (n && !n.value) try { n.focus({ preventScroll: true }); } catch { /* egal */ } return; }
   if (g === 'quick') { const [em, ...rest] = b.dataset.v.split(' '); quickAdd(em, rest.join(' '), b); return; }
   if (g === 'scan') { closeCmp(); chooseSource(); return; }
   manual[g] = true; const was = b.classList.contains('on'); pick(g, (was && g !== 'when') ? null : b.dataset.v); cmpRefresh();

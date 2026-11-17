@@ -1,6 +1,6 @@
 // Service Worker: legt die ganze App auf dem iPhone ab, damit sie ohne Internet läuft.
 // Bei jeder neuen Version VERSION erhöhen, dann holt sich die App das Update beim nächsten Online-Start.
-const VERSION = '2026.11.17-8';
+const VERSION = '2026.11.17-9';
 const CACHE = 'lifestyle-' + VERSION;
 
 // Schritt 1: die App selbst (klein, wird sofort beim Installieren gespeichert)
