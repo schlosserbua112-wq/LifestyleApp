@@ -84,7 +84,7 @@ function refresh(sections = [TODO, SHOP, MONEY, PROJ, MORE], fly, initial) {
   if (!weg) return;
   for (const si of [].concat(sections)) {
     const r = [todoItems, shopItems, moneyItems, projItems, moreItems][si]();
-    weg.setItems(si, r.items, { empty: r.empty, views: r.views, fly, initial });
+    weg.setItems(si, r.items, { empty: r.empty, views: r.views, fly, initial, reset: r.reset });
   }
   weg.refreshHead();
 }
@@ -139,13 +139,30 @@ const qtyField = (n, u) => `<div class="qtyf"><input class="qn" id="qN" inputmod
 const UNIT_NAME = { 'Stück': 'Stück', g: 'Gramm (g)', kg: 'Kilo (kg)', ml: 'Milliliter (ml)', l: 'Liter (l)' };
 const unitOf = (root) => { const sel = root.querySelector('#qU'); return sel ? sel.value : 'Stück'; };
 function setUnit(root, u) { const sel = root.querySelector('#qU'); if (sel) sel.value = u; }
-const shopCard = (x) => `<div class="row">${CK}<div><div class="t">${esc(x.emoji || emoOf(x.title))} ${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([qtyLabel(x.qty), x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
+// Mitwachsende Karten: kurze Liste = große Karten, ab 7 Dingen einzeilig, ab 11 schmale Kiesel. Kein Haken-Kreis mehr:
+// Tippen auf das Ding hakt es ab, Halten und Loslassen öffnet es, Halten und Ziehen verschiebt es.
+const SHOP_SZ = { card: 6, mid: 10, pill: 24 }; // so viele passen je Seite
+const shopSize = () => { const n = onList().length; return n <= 6 ? 'card' : n <= 10 ? 'mid' : 'pill'; };
+const CHK = '<span class="em ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>';
+function shopCard(x, sz, done) {
+  const em = done ? CHK : `<span class="em">${esc(x.emoji || emoOf(x.title))}</span>`;
+  if (sz === 'card') return `<div class="row">${em}<div><div class="t">${esc(x.title)}</div>${x.qty || x.note ? `<div class="s">${esc([qtyLabel(x.qty), x.note].filter(Boolean).join(' · '))}</div>` : ''}</div></div>`;
+  return `<div class="row">${em}<span class="t">${esc(x.title)}</span>${x.qty ? `<span class="q">${esc(x.qty)}</span>` : ''}</div>`;
+}
+let shopSz = null;
 function shopItems() {
   // Wie bei Aufgaben: jedes Ding bekommt einen freien Platz (Mitte, dann rechts) und bleibt dort, bis man es verschiebt.
+  // Der Platz gilt für eine Kartengröße; wechselt die Größe, rücken alle Karten neu zusammen.
+  const sz = shopSize(), reset = shopSz !== null && shopSz !== sz; shopSz = sz;
+  SECT[SHOP].cap = SHOP_SZ[sz];
   const items = onList().slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-    .map((x) => ({ key: x.id, v: x.pos ? x.pos.v : 0, free: true, pos: x.pos || null, views: [0, 1], html: shopCard(x), cls: pendingDone.has(x.id) ? 'done' : '' }));
+    .map((x) => {
+      const pos = x.pos && (x.pos.sz || 'card') === sz ? x.pos : null;
+      const done = pendingDone.has(x.id);
+      return { key: x.id, v: pos ? pos.v : 0, free: true, pos, views: [0, 1], html: shopCard(x, sz, done), cls: `shop sz-${sz}${done ? ' done' : ''}` };
+    });
   for (const f of frequent()) items.push({ key: 'oft:' + norm(f.title), v: -1, html: `<div class="row"><span class="em">${esc(f.emoji || emoOf(f.title))}</span><div><div class="t">${esc(f.title)}</div><div class="s">${f.n}× gekauft</div><span class="add">+ Auf die Liste</span></div></div>` });
-  return { items, empty: { '-1': 'Hier landet, was du oft kaufst.', 0: 'Die Liste ist leer. Tipp auf eine freie Stelle.' } };
+  return { items, reset, empty: { '-1': 'Hier landet, was du oft kaufst.', 0: 'Die Liste ist leer. Tipp auf eine freie Stelle.' } };
 }
 
 // --- Finanzen ---
@@ -260,7 +277,7 @@ function head(si, v) {
   }
   return { k: 'Am Ende des Wegs', t: 'Mehr', l: 'Abgleich, Sicherung und Einstellungen' };
 }
-const tip = (si) => (si === MORE ? '' : si === PROJ ? 'Auf eine freie Stelle tippen, um einen Gedanken festzuhalten' : 'Auf eine freie Stelle tippen, um etwas anzulegen');
+const tip = (si) => (si === MORE ? '' : si === PROJ ? 'Auf eine freie Stelle tippen, um einen Gedanken festzuhalten' : si === SHOP ? 'Tippen hakt ab · Halten öffnet · freie Stelle legt an' : 'Auf eine freie Stelle tippen, um etwas anzulegen');
 
 // ---------- Antippen von Karten ----------
 const pendingDone = new Set();
@@ -278,8 +295,7 @@ async function onCardTap(h) {
       return addShop({ title: f.title, qty: f.qty || '', emoji: f.emoji }, rect, 'Wieder auf der Liste');
     }
     const x = data.shopping.find((y) => y.id === key); if (!x) return;
-    if (lx < 42) return buyShop(x);
-    return shopSheet(x);
+    return buyShop(x);
   }
   if (si === MONEY) {
     if (key.startsWith('cat:')) return categorySheet(key.slice(4));
@@ -351,12 +367,18 @@ async function addShop({ title, qty = '', emoji, note = '' }, rect, msg) {
 
 // Halten und Ziehen: Aufgaben, Einkauf und Projekte merken sich ihren Platz (Seite + x/y).
 async function onReorder() {}
+// Halten und loslassen, ohne zu ziehen: im Einkauf öffnet das Name, Menge und Notiz (Tippen hakt dort ja ab).
+function onHold({ si, key }) {
+  if (si !== SHOP) return;
+  const x = data.shopping.find((y) => y.id === key);
+  if (x && !x.bought) shopSheet(x);
+}
 async function onPlace(si, list) {
   const store = si === TODO ? 'todos' : si === SHOP ? 'shopping' : si === PROJ ? 'ideas' : null;
   if (!store) return;
   for (const { key, pos } of list) {
     const rec = await db.get(store, key);
-    if (rec) await db.put(store, { ...rec, pos });
+    if (rec) await db.put(store, { ...rec, pos: si === SHOP ? { ...pos, sz: shopSize() } : pos });
   }
   markDirty(); await load(); scheduleSync();
 }
@@ -1020,7 +1042,7 @@ async function start() {
     if (!window.THREE) throw new Error('3D-Bibliothek fehlt');
     weg = createWeg({
       sections: SECT, host: document.body, hud: $('#hud'), start: startSt,
-      head, tip, onCardTap, onEmptyTap, onMore, onReorder, onPlace,
+      head, tip, onCardTap, onEmptyTap, onMore, onReorder, onPlace, onHold,
       onStation: (i) => ls.set('lifestyle.station', String(i)),
     });
   } catch (e) {

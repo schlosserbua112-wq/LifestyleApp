@@ -84,6 +84,25 @@ button { border: 0; background: none; padding: 0; cursor: pointer; }
 .wc.more { width: auto; padding: 11px 15px; border-radius: 99px; background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); font: 600 13px/1 var(--sans); white-space: nowrap; }
 .wc.empty { width: 220px; text-align: center; color: var(--ink2); background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: none; font-size: 13.5px; padding: 13px 16px; border-radius: 18px; }
 .wc.mehr .t { -webkit-line-clamp: 1; }
+/* Einkauf: Karten wachsen mit der Liste (groß bis 6, einzeilig bis 10, Kiesel darüber). Kein Haken-Kreis. */
+.wc.shop .row { align-items: center; gap: 7px; }
+.wc.shop .em { font-size: 18px; width: 20px; }
+.wc.shop .em.ok { display: grid; place-items: center; height: 20px; border-radius: 50%; background: var(--acc); }
+.wc.shop .em.ok svg { width: 12px; height: 12px; fill: none; stroke: #fff; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+.wc.shop.done .t { text-decoration-color: var(--acc); text-decoration-thickness: 2px; }
+.wc.shop.done { background: rgba(236,245,236,.95); }
+.wc.shop.sz-card { width: calc(var(--cw) - 8px); }
+.wc.shop.sz-card .row { align-items: flex-start; }
+.wc.shop.sz-mid, .wc.shop.sz-pill { width: auto; }
+.wc.shop.sz-mid { max-width: min(210px, calc(100vw - 72px)); padding: 10px 13px; border-radius: 16px; }
+.wc.shop.sz-pill { max-width: min(186px, calc(50vw - 30px)); padding: 8px 13px 8px 10px; border-radius: 99px; }
+.wc.shop.sz-mid .t, .wc.shop.sz-pill .t { display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wc.shop.sz-mid .t { font-size: 14px; }
+.wc.shop.sz-pill .row { gap: 6px; }
+.wc.shop.sz-pill .t { font-size: 13.5px; line-height: 1.15; }
+.wc.shop.sz-pill .em { font-size: 16px; width: 18px; }
+.wc.shop.sz-pill .em.ok { height: 18px; }
+.wc.shop .q { flex: none; font-size: 12px; color: var(--ink2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* ---------- Anlegen: Karte wächst aus dem Finger ---------- */
 .scrim { position: fixed; inset: 0; z-index: 40; background: rgba(24,30,26,.22); opacity: 0; pointer-events: none; transition: opacity .3s; }
